@@ -206,6 +206,7 @@ class LlamaDecoderLayer(nn.Module):
         layer_id: int = 0,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        attn_layer_type: type[nn.Module] = LlamaAttention,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -224,7 +225,7 @@ class LlamaDecoderLayer(nn.Module):
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
         )
-        self.self_attn = LlamaAttention(
+        self.self_attn = attn_layer_type(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
