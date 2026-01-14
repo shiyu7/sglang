@@ -13,7 +13,6 @@ from common_utils import (
     get_config_filename,
     get_configs_compute_bound,
     get_default_batch_sizes,
-    get_model_config,
     save_configs,
     sort_config,
 )
@@ -314,16 +313,16 @@ class BenchmarkWorker:
 def main(args: argparse.Namespace):
     print(args)
 
-    model_config = get_model_config(
-        args.model, args.tp_size, args.ep_size, args.disable_shared_experts_fusion
-    )
+    # model_config = get_model_config(
+    #     args.model, args.tp_size, args.ep_size, args.disable_shared_experts_fusion
+    # )
 
-    E = model_config["num_experts"]
-    topk = model_config["topk"]
-    hidden_size = model_config["hidden_size"]
-    shard_intermediate_size = model_config["shard_intermediate_size"]
-    dtype = model_config["dtype"]
-    block_shape = model_config["block_shape"]
+    E = 17
+    topk = 9
+    hidden_size = 7168
+    shard_intermediate_size = 2048
+    dtype = torch.bfloat16
+    block_shape = [128, 128]
 
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a8 = args.dtype == "int8_w8a8"
