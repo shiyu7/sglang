@@ -420,6 +420,7 @@ class EAGLEDraftExtendCudaGraphRunner:
             forward_batch.spec_info.positions = self.positions[:num_tokens]
             forward_batch.spec_info.accept_length = self.accept_length[:bs]
 
+        torch.cuda.synchronize()
         self.eagle_worker.draft_extend_attn_backend.init_forward_metadata_replay_cuda_graph(
             bs=bs,
             req_pool_indices=self.req_pool_indices,

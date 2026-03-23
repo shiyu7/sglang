@@ -289,10 +289,11 @@ class EAGLEWorker(TpModelWorker):
                 self.draft_model_runner.tp_group
             ), speculative_moe_backend_context():
                 spec_info = self.draft(batch)
+            torch.cuda.synchronize()
             logits_output, verify_output, model_worker_batch, can_run_cuda_graph = (
                 self.verify(batch, spec_info)
             )
-
+            torch.cuda.synchronize()
             with self.draft_tp_context(
                 self.draft_model_runner.tp_group
             ), speculative_moe_backend_context():
@@ -303,6 +304,7 @@ class EAGLEWorker(TpModelWorker):
                     or batch.spec_info.verified_id.shape[0] > 0
                 ):
                     # decode is not finished
+                    torch.cuda.synchronize()
                     self.forward_draft_extend_after_decode(batch)
 
             return GenerationBatchResult(
@@ -970,6 +972,7 @@ class EAGLEWorker(TpModelWorker):
             and self.cuda_graph_runner_for_draft_extend.can_run(forward_batch)
         )
         if can_cuda_graph:
+            torch.cuda.synchronize()
             logits_output = self.cuda_graph_runner_for_draft_extend.replay(
                 forward_batch
             )
