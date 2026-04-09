@@ -833,6 +833,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         assert self.global_num_tokens_for_logprob_cpu is not None
 
         global_num_tokens = self.global_num_tokens_cpu
+        debug_original_global_num_tokens = list(global_num_tokens)
         sync_group_size = len(global_num_tokens)
         attn_tp_size = get_attention_tp_size()
 

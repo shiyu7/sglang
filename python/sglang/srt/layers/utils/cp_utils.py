@@ -1,11 +1,11 @@
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import Callable, List
+from typing import Callable, List, Tuple
 
 import torch
 import torch.nn.functional as F
 
-from sglang.srt.layers.dp_attention import get_attention_cp_group
+from sglang.srt.layers.dp_attention import get_attention_cp_group, get_attention_cp_size, get_attention_cp_rank
 from sglang.srt.server_args import get_global_server_args
 
 
@@ -17,6 +17,9 @@ class ContextParallelMetadata:
     per_rank_actual_token: List[int] = None
     reverse_split_len: List[int] = None
     cp_reverse_index: List[int] = None
+    rebuild_index_tensor: torch.Tensor = None
+    restore_index_tensor: torch.Tensor = None
+    gathered_index_tensor: torch.Tensor = None
 
     # metadata for attention
     kv_len_prev: int = -1
@@ -27,18 +30,125 @@ class ContextParallelMetadata:
     kv_len_next_tensor: torch.Tensor = None
     actual_seq_q_prev_tensor: torch.Tensor = None
     actual_seq_q_next_tensor: torch.Tensor = None
+    cu_seqlens_q_prev_tensor: torch.Tensor = None
+    cu_seqlens_q_next_tensor: torch.Tensor = None
 
     total_seq_lens: torch.Tensor = None
 
 
+def get_context_parallel_metadata(forward_batch) -> ContextParallelMetadata:
+    metadata = getattr(forward_batch, "attn_cp_metadata", None)
+    if metadata is None:
+        metadata = getattr(forward_batch, "nsa_cp_metadata", None)
+    if metadata is None:
+        raise ValueError("Context parallel metadata is not initialized for this batch.")
+    return metadata
+
+
+def build_zigzag_index_tensors(
+    split_list: List[int],
+    zigzag_index: List[int],
+    per_rank_actual_token: List[int],
+    seq_max_rank_len: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    split_offsets = [0] + list(accumulate(split_list))
+    rebuild_indices = []
+    for split_idx in zigzag_index:
+        rebuild_indices.extend(
+            range(split_offsets[split_idx], split_offsets[split_idx + 1])
+        )
+    rebuild_index_tensor = torch.tensor(
+        rebuild_indices, device=device, dtype=torch.long
+    )
+    restore_index_tensor = torch.empty_like(rebuild_index_tensor)
+    restore_index_tensor[rebuild_index_tensor] = torch.arange(
+        rebuild_index_tensor.numel(), device=device, dtype=torch.long
+    )
+
+    gathered_indices = []
+    for rank_idx, token_count in enumerate(per_rank_actual_token):
+        gathered_indices.extend(
+            range(rank_idx * seq_max_rank_len, rank_idx * seq_max_rank_len + token_count)
+        )
+    gathered_index_tensor = torch.tensor(
+        gathered_indices, device=device, dtype=torch.long
+    )
+    return rebuild_index_tensor, restore_index_tensor, gathered_index_tensor
+
+
 def is_prefill_context_parallel_enabled():
-    return get_global_server_args().enable_prefill_context_parallel
+    """Generic CP gating with NSA compatibility fallback."""
+    args = get_global_server_args()
+    return bool(
+        getattr(args, "enable_prefill_context_parallel", False)
+        or getattr(args, "enable_nsa_prefill_context_parallel", False)
+    )
+
+
+def get_prefill_cp_mode() -> str:
+    """Return the CP split mode with backward compatibility to NSA flags."""
+    args = get_global_server_args()
+    mode = getattr(args, "prefill_cp_mode", None)
+    if mode:
+        return mode
+    # fallback to NSA mode if generic mode not set
+    return getattr(args, "nsa_prefill_cp_mode", "in-seq-split")
 
 
 def is_prefill_cp_in_seq_split():
     return (
         is_prefill_context_parallel_enabled()
-        and get_global_server_args().prefill_cp_mode == "in-seq-split"
+        and get_prefill_cp_mode() == "in-seq-split"
+    )
+
+
+def is_prefill_cp_round_robin_split():
+    return (
+        is_prefill_context_parallel_enabled()
+        and get_prefill_cp_mode() == "round-robin-split"
+    )
+
+
+def can_prefill_cp_round_robin_split(forward_batch) -> bool:
+    """Token-level round-robin split feasibility check."""
+    if not forward_batch.forward_mode.is_context_parallel_extend():
+        return False
+    cp_size = get_attention_cp_size()
+    seq_len = sum(forward_batch.extend_seq_lens_cpu) if forward_batch.extend_seq_lens_cpu is not None else 0
+    return (
+        is_prefill_cp_round_robin_split()
+        and seq_len > 0
+        and seq_len >= cp_size
+        and cp_size > 1
+    )
+
+
+def cp_use_prefill(forward_batch) -> bool:
+    return (
+        forward_batch.attn_cp_metadata is not None
+        and is_prefill_context_parallel_enabled()
+        and forward_batch.forward_mode.is_context_parallel_extend()
+    )
+
+
+def is_prefill_cp(forward_batch) -> bool:
+    """Generic prefill-CP gating across MLA/NSA callers.
+
+    This replaces model-side usage of NSA-specific helpers so that
+    non-NSA MLA models (e.g., Kimi) can still enter the CP path as long as
+    CP metadata is initialized.
+    """
+    if forward_batch is None:
+        return False
+    has_cp_meta = (
+        getattr(forward_batch, "attn_cp_metadata", None) is not None
+        or getattr(forward_batch, "nsa_cp_metadata", None) is not None
+    )
+    return bool(
+        has_cp_meta
+        and is_prefill_context_parallel_enabled()
+        and forward_batch.forward_mode.is_context_parallel_extend()
     )
 
 
@@ -47,7 +157,6 @@ def can_cp_split(seq_len: int, cp_size: int, forward_batch):
     # Note: (self.cp_size * 2) To achieve load balancing for seq computation,
     # the seq data needs to be divided and recombined at twice the size of cp_size.
     cur_cp_seq_len = seq_len // (cp_size * 2)
-    # print("DEBUG: can_cp_split", cur_cp_seq_len, cp_size, forward_batch.forward_mode.is_context_parallel_extend(), is_prefill_context_parallel_enabled(), flush=True)
     if (
         cur_cp_seq_len != 0
         and cp_size > 1
@@ -60,24 +169,19 @@ def can_cp_split(seq_len: int, cp_size: int, forward_batch):
 
 
 def cp_split_and_rebuild_data(forward_batch, input_: torch.Tensor):
-    input_list = list(
-        torch.split(input_, forward_batch.attn_cp_metadata.split_list, dim=0)
-    )
-    result = torch.cat(
-        [input_list[i] for i in forward_batch.attn_cp_metadata.zigzag_index], dim=0
-    ).view(-1, input_.shape[-1])
-    return result
+    if is_prefill_cp_round_robin_split():
+        return cp_round_robin_split_data(input_)
+    metadata = get_context_parallel_metadata(forward_batch)
+    return input_.index_select(0, metadata.rebuild_index_tensor)
 
 
 def cp_split_and_rebuild_position(forward_batch, positions: torch.Tensor):
-    position_id_list = list(
-        torch.split(positions, forward_batch.attn_cp_metadata.split_list, dim=-1)
+    if is_prefill_cp_round_robin_split():
+        return cp_round_robin_split_data(positions)
+    metadata = get_context_parallel_metadata(forward_batch)
+    return positions.index_select(
+        positions.dim() - 1, metadata.rebuild_index_tensor
     )
-    positions = torch.cat(
-        [position_id_list[i] for i in forward_batch.attn_cp_metadata.zigzag_index],
-        dim=-1,
-    )
-    return positions
 
 
 def cp_all_gather_reorganized_into_tensor(
@@ -105,23 +209,8 @@ def cp_all_gather_reorganized_into_tensor(
     get_attention_cp_group().cp_all_gather_into_tensor_async(
         input_tensor_full, input_tensor, stream
     )
-
-    outputs_list_max = list(
-        torch.split(
-            input_tensor_full, forward_batch.attn_cp_metadata.max_rank_len, dim=0
-        )
-    )
-    outputs = torch.cat(
-        [
-            outputs_list_max[index][:per_rank_len]
-            for index, per_rank_len in enumerate(
-                forward_batch.attn_cp_metadata.per_rank_actual_token
-            )
-        ],
-        dim=0,
-    )
-
-    return outputs
+    metadata = get_context_parallel_metadata(forward_batch)
+    return input_tensor_full.index_select(0, metadata.gathered_index_tensor)
 
 
 def cp_all_gather_reorganized_into_tensor_kv_cache(
@@ -151,23 +240,8 @@ def cp_all_gather_reorganized_into_tensor_kv_cache(
     get_attention_cp_group().cp_all_gather_into_tensor_async(
         input_tensor_full, input_tensor, stream
     )
-
-    outputs_list_max = list(
-        torch.split(
-            input_tensor_full, forward_batch.attn_cp_metadata.max_rank_len, dim=0
-        )
-    )
-    outputs = torch.cat(
-        [
-            outputs_list_max[index][:per_rank_len]
-            for index, per_rank_len in enumerate(
-                forward_batch.attn_cp_metadata.per_rank_actual_token
-            )
-        ],
-        dim=0,
-    )
-
-    return outputs
+    metadata = get_context_parallel_metadata(forward_batch)
+    return input_tensor_full.index_select(0, metadata.gathered_index_tensor)
 
 
 def cp_all_gather_rerange_output(input_tensor, cp_size, forward_batch, stream):
@@ -187,24 +261,25 @@ def cp_all_gather_rerange_output(input_tensor, cp_size, forward_batch, stream):
     |   +-------------------------+
     """
 
-    # TODO: Do we need to remove the padding here?
-    bs_seq_len, hidden_size = input_tensor.shape
-    output_tensor = cp_all_gather_reorganized_into_tensor(
-        input_tensor,
-        forward_batch.attn_cp_metadata.total_seq_lens,
-        cp_size,
-        forward_batch,
-        stream,
-    )
-    outputs_list = list(
-        torch.split(
-            output_tensor, forward_batch.attn_cp_metadata.reverse_split_len, dim=0
+    if is_prefill_cp_round_robin_split():
+        # equal-width token interleave/disinterleave across cp ranks
+        # shape-preserving: gather then transpose/rearrange to original token order
+        output_tensor = input_tensor.new_empty(
+            (input_tensor.shape[0] * cp_size, *input_tensor.shape[1:])
         )
+        get_attention_cp_group().cp_all_gather_into_tensor_async(output_tensor, input_tensor, stream)
+        out_shape = output_tensor.shape
+        output_tensor = output_tensor.view(cp_size, -1, *out_shape[1:]).transpose(0, 1).reshape(out_shape)
+        return output_tensor
+    # in-seq-split path (zigzag)
+    metadata = get_context_parallel_metadata(forward_batch)
+    hidden_size = (
+        input_tensor.shape[1] if input_tensor.dim() == 2 else input_tensor.shape[-1]
     )
-    output_tensor = torch.cat(
-        [outputs_list[i] for i in forward_batch.attn_cp_metadata.cp_reverse_index],
-        dim=0,
+    output_tensor = cp_all_gather_reorganized_into_tensor(
+        input_tensor, metadata.total_seq_lens, cp_size, forward_batch, stream
     )
+    output_tensor = output_tensor.index_select(0, metadata.restore_index_tensor)
     output_tensor = output_tensor.view(-1, hidden_size)
     return output_tensor
 
@@ -227,22 +302,26 @@ def cp_all_gather_rerange_kv_cache(input_tensor, cp_size, forward_batch, stream)
     | block0 | block1 | block2 | block3 | block4 | block5 | block6 | block7 |
     |   +-------------------------+
     """
+    if is_prefill_cp_round_robin_split():
+        output_tensor = input_tensor.new_empty(
+            (input_tensor.shape[0] * cp_size, *input_tensor.shape[1:])
+        )
+        get_attention_cp_group().cp_all_gather_into_tensor_async(
+            output_tensor, input_tensor, stream
+        )
+        out_shape = output_tensor.shape
+        return output_tensor.view(cp_size, -1, *out_shape[1:]).transpose(0, 1).reshape(
+            out_shape
+        )
+    metadata = get_context_parallel_metadata(forward_batch)
     output_tensor = cp_all_gather_reorganized_into_tensor_kv_cache(
         input_tensor,
-        forward_batch.attn_cp_metadata.total_seq_lens,
+        metadata.total_seq_lens,
         cp_size,
         forward_batch,
         stream,
     )
-    outputs_list = list(
-        torch.split(
-            output_tensor, forward_batch.attn_cp_metadata.reverse_split_len, dim=0
-        )
-    )
-    output_tensor = torch.cat(
-        [outputs_list[i] for i in forward_batch.attn_cp_metadata.cp_reverse_index],
-        dim=0,
-    )
+    output_tensor = output_tensor.index_select(0, metadata.restore_index_tensor)
     # No need to reshape - output_tensor already has the correct shape [seq_len, ...]
     return output_tensor
 
@@ -278,6 +357,34 @@ def cp_allgather_and_save_kv_cache(forward_batch, layer, k, v, cp_size):
     )
 
 
+def cp_allgather_and_save_mla_kv_cache(forward_batch, layer, k_nope, k_rope, cp_size):
+    """
+    Allgather MLA KV (k_nope, k_rope) from all CP ranks and write the full result
+    into each rank's local memory pool via set_mla_kv_buffer.
+    """
+    cache_loc = (
+        forward_batch.out_cache_loc
+        if not layer.is_cross_attention
+        else forward_batch.encoder_out_cache_loc
+    )
+    k_nope = k_nope.contiguous()
+    k_rope = k_rope.contiguous()
+
+    k_nope_full = cp_all_gather_rerange_kv_cache(
+        k_nope, cp_size, forward_batch, torch.cuda.current_stream()
+    )
+    k_rope_full = cp_all_gather_rerange_kv_cache(
+        k_rope, cp_size, forward_batch, torch.cuda.current_stream()
+    )
+
+    forward_batch.token_to_kv_pool.set_mla_kv_buffer(  # type: ignore
+        layer,
+        cache_loc,
+        k_nope_full,
+        k_rope_full,
+    )
+
+
 def cp_attn_forward_extend(
     forward_batch,
     q: torch.Tensor,
@@ -298,18 +405,18 @@ def cp_attn_forward_extend(
 
     q_prev, q_next = torch.chunk(q, 2, dim=0)
 
-    cu_seqlens_q_prev = torch.tensor(
-        [0, cp_meta.actual_seq_q_prev], device=device, dtype=torch.int32
-    )
     result_prev = attn_fn(
-        q_prev, cu_seqlens_q_prev, cp_meta.kv_len_prev_tensor, cp_meta.actual_seq_q_prev
+        q_prev,
+        cp_meta.cu_seqlens_q_prev_tensor,
+        cp_meta.kv_len_prev_tensor,
+        cp_meta.actual_seq_q_prev,
     )
 
-    cu_seqlens_q_next = torch.tensor(
-        [0, cp_meta.actual_seq_q_next], device=device, dtype=torch.int32
-    )
     result_next = attn_fn(
-        q_next, cu_seqlens_q_next, cp_meta.kv_len_next_tensor, cp_meta.actual_seq_q_next
+        q_next,
+        cp_meta.cu_seqlens_q_next_tensor,
+        cp_meta.kv_len_next_tensor,
+        cp_meta.actual_seq_q_next,
     )
 
     return torch.concat([result_prev, result_next], dim=0)
@@ -321,7 +428,7 @@ def prepare_context_parallel_metadata(
     cp_size,
     seqs_len,
 ):
-    """prepare_input_dp_with_cp_dsa-zigzag index
+    """prepare_input_dp_with_cp_dsa-zigzag index（in-seq-split）
     Example (DP_ATTENT_TP == CP_SIZE == 4):
     Description:
     1. Start with a full-length request.
@@ -387,8 +494,9 @@ def prepare_context_parallel_metadata(
     if remainder > 0:
         split_list[:remainder] = [x + 1 for x in split_list[:remainder]]
 
-    seq_max_rank_len = (kv_len + cp_size - 1) // cp_size
-    max_rank_len = seq_max_rank_len.repeat_interleave(cp_size).int().tolist()
+    seq_max_rank_len_tensor = (kv_len + cp_size - 1) // cp_size
+    seq_max_rank_len = int(seq_max_rank_len_tensor.item())
+    max_rank_len = seq_max_rank_len_tensor.repeat_interleave(cp_size).int().tolist()
     zigzag_index = list(
         range(cp_rank, cp_rank + bs_per_cp_group * cp_segment_num, cp_segment_num)
     ) + list(
@@ -431,13 +539,30 @@ def prepare_context_parallel_metadata(
     actual_seq_q_prev = split_list[cp_rank]
     actual_seq_q_next = split_list[cp_size * 2 - cp_rank - 1]
     # Flash Attention expects cache_seqlens to have shape (batch_size,), not scalar
-    kv_len_prev_tensor = torch.tensor([kv_len_prev], device="cuda", dtype=torch.int32)
-    kv_len_next_tensor = torch.tensor([kv_len_next], device="cuda", dtype=torch.int32)
+    device = torch.device("cuda")
+    kv_len_prev_tensor = torch.tensor([kv_len_prev], device=device, dtype=torch.int32)
+    kv_len_next_tensor = torch.tensor([kv_len_next], device=device, dtype=torch.int32)
     actual_seq_q_prev_tensor = torch.tensor(
-        [actual_seq_q_prev], device="cuda", dtype=torch.int32
+        [actual_seq_q_prev], device=device, dtype=torch.int32
     )
     actual_seq_q_next_tensor = torch.tensor(
-        [actual_seq_q_next], device="cuda", dtype=torch.int32
+        [actual_seq_q_next], device=device, dtype=torch.int32
+    )
+    cu_seqlens_q_prev_tensor = torch.tensor(
+        [0, actual_seq_q_prev], device=device, dtype=torch.int32
+    )
+    cu_seqlens_q_next_tensor = torch.tensor(
+        [0, actual_seq_q_next], device=device, dtype=torch.int32
+    )
+
+    rebuild_index_tensor, restore_index_tensor, gathered_index_tensor = (
+        build_zigzag_index_tensors(
+            split_list=split_list,
+            zigzag_index=zigzag_index,
+            per_rank_actual_token=per_rank_actual_token,
+            seq_max_rank_len=seq_max_rank_len,
+            device=device,
+        )
     )
 
     attn_cp_metadata = ContextParallelMetadata(
@@ -447,6 +572,9 @@ def prepare_context_parallel_metadata(
         per_rank_actual_token=per_rank_actual_token,
         reverse_split_len=reverse_split_len,
         cp_reverse_index=cp_reverse_index,
+        rebuild_index_tensor=rebuild_index_tensor,
+        restore_index_tensor=restore_index_tensor,
+        gathered_index_tensor=gathered_index_tensor,
         kv_len_prev=kv_len_prev,
         kv_len_next=kv_len_next,
         actual_seq_q_prev=actual_seq_q_prev,
@@ -455,6 +583,47 @@ def prepare_context_parallel_metadata(
         kv_len_next_tensor=kv_len_next_tensor,
         actual_seq_q_prev_tensor=actual_seq_q_prev_tensor,
         actual_seq_q_next_tensor=actual_seq_q_next_tensor,
+        cu_seqlens_q_prev_tensor=cu_seqlens_q_prev_tensor,
+        cu_seqlens_q_next_tensor=cu_seqlens_q_next_tensor,
         total_seq_lens=kv_len_origin,
     )
     return attn_cp_metadata
+
+
+# ========== Round-robin split (generic) ==========
+def cp_round_robin_split_data(input_: torch.Tensor):
+    """Token-level round-robin split: token_i -> cp_rank = i % cp_size."""
+    cp_size = get_attention_cp_size()
+    cp_rank = get_attention_cp_rank()
+    if input_.shape[0] % cp_size != 0:
+        cur_len = input_.shape[0] // cp_size + (input_.shape[0] % cp_size > cp_rank)
+        if cur_len == 0:
+            return input_.new_empty(0, *input_.shape[1:])
+        indices = torch.arange(cp_rank, input_.shape[0], cp_size, device=input_.device)
+        return input_[indices]
+    return input_.view(-1, cp_size, *input_.shape[1:])[:, cp_rank].contiguous()
+
+
+def cp_round_robin_split_q_seqs_cpu(extend_seqs_cpu: List[int]) -> Tuple[List[int], List[int]]:
+    """CPU 版 round-robin 分配后的每条序列分段长度与被选中的序列下标（长度>0）。"""
+    cp_size = get_attention_cp_size()
+    cp_rank = get_attention_cp_rank()
+    extra_seq = 0
+    q_seqs = []
+    for cur_len in extend_seqs_cpu:
+        cur_len += extra_seq
+        cur_seq = cur_len // cp_size + int(cur_len % cp_size > cp_rank)
+        q_seqs.append(cur_seq)
+        extra_seq = cur_len - cur_seq * cp_size
+    bs_idx = [i for i, x in enumerate(q_seqs) if x > 0]
+    q_seqs = [q_len for q_len in q_seqs if q_len > 0]
+    return q_seqs, bs_idx
+
+
+def prepare_round_robin_context_parallel_metadata(kv_len, _cp_rank, _cp_size, _seqs_len):
+    """
+    Round-robin mode does not need zigzag metadata. We still return a metadata object
+    so callers can use a unified `attn_cp_metadata is not None` contract.
+    """
+    _ = (_cp_rank, _cp_size, _seqs_len)
+    return ContextParallelMetadata(total_seq_lens=torch.tensor(kv_len))

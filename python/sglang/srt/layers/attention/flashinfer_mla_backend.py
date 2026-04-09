@@ -21,7 +21,12 @@ from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.flashinfer_backend import (
     create_flashinfer_kv_indices_triton,
 )
-from sglang.srt.layers.dp_attention import get_attention_tp_size
+from sglang.srt.layers.dp_attention import get_attention_cp_rank, get_attention_tp_size
+from sglang.srt.layers.utils.cp_utils import (
+    cp_attn_forward_extend,
+    cp_use_prefill,
+    is_prefill_cp_round_robin_split,
+)
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.spec_info import SpecInput
@@ -319,7 +324,12 @@ class FlashInferMLAAttnBackend(AttentionBackend):
             self.forward_metadata = PrefillMetadata(self.prefill_wrapper_verify, False)
         else:
             prefix_lens = forward_batch.extend_prefix_lens
-            extend_no_prefix = not any(forward_batch.extend_prefix_lens_cpu)
+            # Whether this extend has any prefix cache to attend.
+            # Used to decide if we can use ragged prefill wrapper safely.
+            extend_no_prefix = (
+                forward_batch.extend_prefix_lens_cpu is not None
+                and not any(forward_batch.extend_prefix_lens_cpu)
+            )
             use_ragged = (
                 not get_global_server_args().flashinfer_mla_disable_ragged
                 and extend_no_prefix
@@ -527,6 +537,10 @@ class FlashInferMLAAttnBackend(AttentionBackend):
         q_rope: Optional[torch.Tensor] = None,
         k_rope: Optional[torch.Tensor] = None,
     ):
+        # CP contract:
+        # When `cp_use_prefill(forward_batch)` is true, callers must provide `k/v` that
+        # are already all-gathered and reranked into the global token order expected
+        # by the CP metadata. This backend will not re-allgather/rerank the input KV.
         if forward_batch.attn_attend_prefix_cache is not None and any(
             forward_batch.extend_prefix_lens_cpu
         ):  # MHA Chunk
@@ -538,17 +552,18 @@ class FlashInferMLAAttnBackend(AttentionBackend):
         cache_loc = forward_batch.out_cache_loc
         logits_soft_cap = layer.logit_cap
         prefill_wrapper_paged = self.forward_metadata.prefill_wrapper
+        use_prefill_cp = cp_use_prefill(forward_batch)
+        cp_size = get_global_server_args().attn_cp_size
 
         # Save kv cache
         if save_kv_cache and k is not None:
             assert v is not None
-            if save_kv_cache:
-                if k_rope is not None:
-                    forward_batch.token_to_kv_pool.set_mla_kv_buffer(
-                        layer, cache_loc, k, k_rope
-                    )
-                else:
-                    forward_batch.token_to_kv_pool.set_kv_buffer(layer, cache_loc, k, v)
+            if k_rope is not None:
+                forward_batch.token_to_kv_pool.set_mla_kv_buffer(
+                    layer, cache_loc, k, k_rope
+                )
+            else:
+                forward_batch.token_to_kv_pool.set_kv_buffer(layer, cache_loc, k, v)
         if q_rope is not None:
             q = q.view(-1, layer.tp_q_head_num, layer.v_head_dim)
             q_rope = q_rope.view(
@@ -557,19 +572,107 @@ class FlashInferMLAAttnBackend(AttentionBackend):
 
         if self.forward_metadata.use_ragged:
             # ragged prefill
-            if q_rope is not None:
-                q = torch.cat([q, q_rope], dim=-1)
-            qall = q.view(-1, layer.tp_q_head_num, layer.head_dim)
-            if k_rope is not None:
-                k = torch.cat([k, k_rope], dim=-1)
-            o = self.prefill_wrapper_ragged.forward(
-                qall,
-                k.view(-1, layer.tp_k_head_num, layer.head_dim).to(q.dtype),
-                v.view(-1, layer.tp_k_head_num, layer.v_head_dim).to(q.dtype),
-                causal=True,
-                sm_scale=layer.scaling,
-                logits_soft_cap=logits_soft_cap,
-            )
+            if use_prefill_cp and q_rope is None and not is_prefill_cp_round_robin_split():
+                assert k is not None and v is not None
+                k_all = k.to(q.dtype).view(-1, layer.tp_k_head_num, layer.head_dim)
+                v_all = v.to(q.dtype).view(-1, layer.tp_k_head_num, layer.v_head_dim)
+
+                def _cp_ragged_mha_attn(
+                    q_chunk, _cu_seqlens_q_cp, cache_seqlens_cp, _max_seqlen_q_cp
+                ):
+                    kv_len = int(cache_seqlens_cp[0].item())
+                    qo_indptr = torch.tensor(
+                        [0, q_chunk.shape[0]], device=q_chunk.device, dtype=torch.int32
+                    )
+                    kv_indptr = torch.tensor(
+                        [0, kv_len], device=q_chunk.device, dtype=torch.int32
+                    )
+                    self.prefill_wrapper_ragged.begin_forward(
+                        qo_indptr=qo_indptr,
+                        kv_indptr=kv_indptr,
+                        num_qo_heads=layer.tp_q_head_num,
+                        num_kv_heads=layer.tp_k_head_num,
+                        head_dim_qk=layer.head_dim,
+                        head_dim_vo=layer.v_head_dim,
+                        q_data_type=q_chunk.dtype,
+                        causal=True,
+                    )
+                    return self.prefill_wrapper_ragged.forward(
+                        q_chunk.view(-1, layer.tp_q_head_num, layer.head_dim),
+                        k_all[:kv_len],
+                        v_all[:kv_len],
+                        causal=True,
+                        sm_scale=layer.scaling,
+                        logits_soft_cap=logits_soft_cap,
+                    )
+
+                o = cp_attn_forward_extend(
+                    forward_batch,
+                    q,
+                    q.device,
+                    _cp_ragged_mha_attn,
+                )
+            elif use_prefill_cp and q_rope is None and is_prefill_cp_round_robin_split():
+                assert k is not None and v is not None
+                q_all = q.view(-1, layer.tp_q_head_num, layer.head_dim)
+                k_all = k.to(q.dtype).view(-1, layer.tp_k_head_num, layer.head_dim)
+                v_all = v.to(q.dtype).view(-1, layer.tp_k_head_num, layer.v_head_dim)
+                prefix_len = 0
+                if (
+                    forward_batch.seq_lens_cpu is not None
+                    and len(forward_batch.seq_lens_cpu) == 1
+                ):
+                    prefix_len = max(
+                        int(forward_batch.seq_lens_cpu[0]) - int(k_all.shape[0]),
+                        0,
+                    )
+                cp_rank = get_attention_cp_rank()
+                outputs = []
+                for token_idx in range(q_all.shape[0]):
+                    kv_len = prefix_len + cp_rank + token_idx * cp_size + 1
+                    qo_indptr = torch.tensor(
+                        [0, 1], device=q_all.device, dtype=torch.int32
+                    )
+                    kv_indptr = torch.tensor(
+                        [0, kv_len], device=q_all.device, dtype=torch.int32
+                    )
+                    self.prefill_wrapper_ragged.begin_forward(
+                        qo_indptr=qo_indptr,
+                        kv_indptr=kv_indptr,
+                        num_qo_heads=layer.tp_q_head_num,
+                        num_kv_heads=layer.tp_k_head_num,
+                        head_dim_qk=layer.head_dim,
+                        head_dim_vo=layer.v_head_dim,
+                        q_data_type=q_all.dtype,
+                        causal=True,
+                    )
+                    outputs.append(
+                        self.prefill_wrapper_ragged.forward(
+                            q_all[token_idx : token_idx + 1],
+                            k_all[:kv_len],
+                            v_all[:kv_len],
+                            causal=True,
+                            sm_scale=layer.scaling,
+                            logits_soft_cap=logits_soft_cap,
+                        )
+                    )
+                o = torch.cat(outputs, dim=0)
+            else:
+                if q_rope is not None:
+                    q = torch.cat([q, q_rope], dim=-1)
+                if k_rope is not None:
+                    k = torch.cat([k, k_rope], dim=-1)
+                qall = q.view(-1, layer.tp_q_head_num, layer.head_dim)
+                k_all = k.to(q.dtype).view(-1, layer.tp_k_head_num, layer.head_dim)
+                v_all = v.to(q.dtype).view(-1, layer.tp_k_head_num, layer.v_head_dim)
+                o = self.prefill_wrapper_ragged.forward(
+                    qall,
+                    k_all,
+                    v_all,
+                    causal=True,
+                    sm_scale=layer.scaling,
+                    logits_soft_cap=logits_soft_cap,
+                )
         else:
             # mla paged prefill
             k_buf = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).to(
@@ -776,7 +879,6 @@ class FlashInferMLAIndicesUpdaterPrefill:
         self.data_type = model_runner.dtype
         self.q_data_type = model_runner.dtype
         self.attn_backend = attn_backend
-
         # Buffers and wrappers
         self.kv_indptr = attn_backend.kv_indptr
         self.qo_indptr = attn_backend.qo_indptr
@@ -785,20 +887,18 @@ class FlashInferMLAIndicesUpdaterPrefill:
 
     def update(
         self,
-        req_pool_indices: torch.Tnesor,
+        req_pool_indices: torch.Tensor,
         seq_lens: torch.Tensor,
         seq_lens_sum: int,
-        prefix_lens: torch.Tensor,
+        prefix_lens: Optional[torch.Tensor],
         prefill_wrapper_paged: BatchMLAPagedAttentionWrapper,
         use_ragged: bool,
         spec_info: Optional[SpecInput] = None,
     ):
-        if use_ragged:
-            paged_kernel_lens = prefix_lens
-            paged_kernel_lens_sum = paged_kernel_lens.sum().item()
-        else:
-            paged_kernel_lens = seq_lens
-            paged_kernel_lens_sum = seq_lens_sum
+        # In the MLA prefill updater, ragged mode is only enabled for no-prefix
+        # extends, so both ragged and paged paths use the current extend lengths.
+        paged_kernel_lens = seq_lens
+        paged_kernel_lens_sum = seq_lens_sum
 
         self.call_begin_forward(
             self.prefill_wrapper_ragged,
@@ -822,7 +922,7 @@ class FlashInferMLAIndicesUpdaterPrefill:
         paged_kernel_lens: torch.Tensor,
         paged_kernel_lens_sum: int,
         seq_lens: torch.Tensor,
-        prefix_lens: torch.Tensor,
+        prefix_lens: Optional[torch.Tensor],
         kv_indptr: torch.Tensor,
         qo_indptr: torch.Tensor,
         use_ragged: bool,
@@ -835,6 +935,16 @@ class FlashInferMLAIndicesUpdaterPrefill:
             assert len(seq_lens) == len(req_pool_indices)
             kv_indptr[1 : bs + 1] = torch.cumsum(paged_kernel_lens, dim=0)
             kv_indptr = kv_indptr[: bs + 1]
+
+            # Speculative flows (verify/draft-extend) can pass prefix_lens=None.
+            # In that case, the query length equals seq_lens.
+            if prefix_lens is None:
+                qo_lens = seq_lens
+            else:
+                qo_lens = seq_lens - prefix_lens
+
+            qo_indptr[1 : bs + 1] = torch.cumsum(qo_lens, dim=0)
+            qo_indptr = qo_indptr[: bs + 1]
             kv_indices = torch.empty(
                 paged_kernel_lens_sum,
                 dtype=torch.int32,
@@ -849,20 +959,16 @@ class FlashInferMLAIndicesUpdaterPrefill:
                 kv_indices,
                 self.req_to_token.shape[1],
             )
-            qo_indptr[1 : bs + 1] = torch.cumsum(seq_lens - prefix_lens, dim=0)
-            qo_indptr = qo_indptr[: bs + 1]
-            custom_mask = None
         else:
-            assert isinstance(spec_info, SpecInput)
-            # TODO: Support topk > 1 with custom mask
-            kv_indices, kv_indptr, qo_indptr, custom_mask = (
-                spec_info.generate_attn_arg_prefill(
-                    req_pool_indices,
-                    paged_kernel_lens,
-                    paged_kernel_lens_sum,
-                    self.req_to_token,
-                )
-            )
+            # SpecInput provides KV indices/indptr; still compute qo_indptr from seq lengths.
+            kv_indptr, kv_indices = spec_info.kv_indptr, spec_info.kv_indices
+            kv_indptr = kv_indptr[: bs + 1]
+            if prefix_lens is None:
+                qo_lens = seq_lens
+            else:
+                qo_lens = seq_lens - prefix_lens
+            qo_indptr = qo_indptr[: bs + 1]
+            qo_indptr[1 : bs + 1] = torch.cumsum(qo_lens, dim=0)
 
         if use_ragged:
             # ragged prefill
@@ -880,8 +986,8 @@ class FlashInferMLAIndicesUpdaterPrefill:
             # mla paged prefill
             kv_len_arr = kv_indptr[1:] - kv_indptr[:-1]
             wrapper_paged.plan(
-                qo_indptr,
-                kv_indptr,
+                qo_indptr[: bs + 1],
+                kv_indptr[: bs + 1],
                 kv_indices,
                 kv_len_arr,
                 self.num_local_heads,

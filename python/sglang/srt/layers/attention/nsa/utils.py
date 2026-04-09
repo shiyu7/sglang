@@ -11,6 +11,11 @@ import triton.language as tl
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
 )
+from sglang.srt.layers.utils.cp_utils import (
+    build_zigzag_index_tensors,
+    cp_split_and_rebuild_data as generic_cp_split_and_rebuild_data,
+    cp_split_and_rebuild_position as generic_cp_split_and_rebuild_position,
+)
 from sglang.srt.layers.dp_attention import (
     DpPaddingMode,
     attn_cp_all_gather_into_tensor,
@@ -144,6 +149,9 @@ class NSAContextParallelMetadata:
     per_rank_actual_token: List[int] = None
     reverse_split_len: List[int] = None
     cp_reverse_index: List[int] = None
+    rebuild_index_tensor: torch.Tensor = None
+    restore_index_tensor: torch.Tensor = None
+    gathered_index_tensor: torch.Tensor = None
     kv_len_prev: int = -1
     kv_len_next: int = -1
     actual_seq_q_prev: int = -1
@@ -180,39 +188,11 @@ def can_cp_split(seq_len: int, cp_size: int, use_nsa: bool, forward_batch):
 
 
 def cp_split_and_rebuild_data(forward_batch, input_: torch.Tensor):
-    if is_nsa_prefill_cp_round_robin_split():
-        cp_size = get_attention_cp_size()
-        assert (
-            input_.shape[0] % cp_size == 0
-        ), f"Expect input shape 0 can divided by cp size, but got input shape {input_.shape}, cp size {cp_size}"
-        return nsa_cp_round_robin_split_data(input_)
-
-    input_list = list(
-        torch.split(input_, forward_batch.nsa_cp_metadata.split_list, dim=0)
-    )
-    result = torch.cat(
-        [input_list[i] for i in forward_batch.nsa_cp_metadata.zigzag_index], dim=0
-    ).view(-1, input_.shape[-1])
-    return result
+    return generic_cp_split_and_rebuild_data(forward_batch, input_)
 
 
 def cp_split_and_rebuild_position(forward_batch, positions: torch.Tensor):
-    if is_nsa_prefill_cp_round_robin_split():
-        cp_size = get_attention_cp_size()
-        assert positions.shape[0] % cp_size == 0, (
-            f"Expect positions shape 0 can divided by cp size, but got positions shape {positions.shape}, "
-            f"cp size {cp_size}"
-        )
-        return nsa_cp_round_robin_split_data(positions)
-
-    position_id_list = list(
-        torch.split(positions, forward_batch.nsa_cp_metadata.split_list, dim=-1)
-    )
-    positions = torch.cat(
-        [position_id_list[i] for i in forward_batch.nsa_cp_metadata.zigzag_index],
-        dim=-1,
-    )
-    return positions
+    return generic_cp_split_and_rebuild_position(forward_batch, positions)
 
 
 @triton.jit
@@ -283,9 +263,12 @@ def nsa_cp_round_robin_split_q_seqs(
 
 def nsa_use_prefill_cp(forward_batch, nsa_enable_prefill_cp=None):
     if nsa_enable_prefill_cp is None:
-        nsa_enable_prefill_cp = is_nsa_enable_prefill_cp()
+        nsa_enable_prefill_cp = get_global_server_args().prefill_cp_enabled()
     if (
-        forward_batch.nsa_cp_metadata is not None
+        (
+            forward_batch.nsa_cp_metadata is not None
+            or forward_batch.attn_cp_metadata is not None
+        )
         and nsa_enable_prefill_cp
         and forward_batch.forward_mode.is_context_parallel_extend()
     ):
@@ -509,8 +492,9 @@ def prepare_input_dp_with_cp_dsa(
     if remainder > 0:
         split_list[:remainder] = [x + 1 for x in split_list[:remainder]]
 
-    seq_max_rank_len = (kv_len + cp_size - 1) // cp_size
-    max_rank_len = seq_max_rank_len.repeat_interleave(cp_size).int().tolist()
+    seq_max_rank_len_tensor = (kv_len + cp_size - 1) // cp_size
+    seq_max_rank_len = int(seq_max_rank_len_tensor.item())
+    max_rank_len = seq_max_rank_len_tensor.repeat_interleave(cp_size).int().tolist()
     zigzag_index = list(
         range(cp_rank, cp_rank + bs_per_cp_group * cp_segment_num, cp_segment_num)
     ) + list(
@@ -558,6 +542,15 @@ def prepare_input_dp_with_cp_dsa(
     actual_seq_q_next_tensor = torch.tensor(actual_seq_q_next).to(
         device="cuda", dtype=torch.int32
     )
+    rebuild_index_tensor, restore_index_tensor, gathered_index_tensor = (
+        build_zigzag_index_tensors(
+            split_list=split_list,
+            zigzag_index=zigzag_index,
+            per_rank_actual_token=per_rank_actual_token,
+            seq_max_rank_len=seq_max_rank_len,
+            device=torch.device("cuda"),
+        )
+    )
 
     nsa_cp_metadata = NSAContextParallelMetadata(
         split_list=split_list,
@@ -566,6 +559,9 @@ def prepare_input_dp_with_cp_dsa(
         per_rank_actual_token=per_rank_actual_token,
         reverse_split_len=reverse_split_len,
         cp_reverse_index=cp_reverse_index,
+        rebuild_index_tensor=rebuild_index_tensor,
+        restore_index_tensor=restore_index_tensor,
+        gathered_index_tensor=gathered_index_tensor,
         kv_len_prev=kv_len_prev,
         kv_len_next=kv_len_next,
         actual_seq_q_prev=actual_seq_q_prev,

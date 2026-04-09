@@ -55,12 +55,8 @@ from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.amx_utils import PackWeightMethod
 from sglang.srt.layers.attention.nsa.nsa_indexer import Indexer
 from sglang.srt.layers.attention.nsa.utils import (
-    can_cp_split,
-    cp_all_gather_rerange_output,
-    cp_split_and_rebuild_data,
-    cp_split_and_rebuild_position,
+    can_cp_split as nsa_can_cp_split,
     is_nsa_enable_prefill_cp,
-    nsa_use_prefill_cp,
     prepare_input_dp_with_cp_dsa,
 )
 from sglang.srt.layers.communicator import (
@@ -109,6 +105,15 @@ from sglang.srt.layers.quantization.fp8 import Fp8Config
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import get_rope_wrapper
 from sglang.srt.layers.utils import PPMissingLayer
+from sglang.srt.layers.utils.cp_utils import (
+    can_cp_split as cp_can_cp_split,
+    cp_all_gather_rerange_output,
+    cp_split_and_rebuild_data,
+    cp_split_and_rebuild_position,
+    is_prefill_cp,
+    is_prefill_context_parallel_enabled,
+    prepare_context_parallel_metadata,
+)
 from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -296,7 +301,6 @@ class MoEGate(nn.Module):
             self.e_score_correction_bias = None
         if _is_cpu and _is_cpu_amx_available:
             self.quant_method = PackWeightMethod(weight_names=["weight"])
-        self.nsa_enable_prefill_cp = is_nsa_enable_prefill_cp()
 
     def forward(
         self,
@@ -315,7 +319,7 @@ class MoEGate(nn.Module):
         if get_global_server_args().enable_deterministic_inference:
             return F.linear(hidden_states, self.weight, None)
 
-        if forward_batch is not None and nsa_use_prefill_cp(forward_batch):
+        if forward_batch is not None and is_prefill_cp(forward_batch):
             logits = F.linear(hidden_states, self.weight, None)
         else:
             # NOTE: For some unknown reason, router_gemm seems degrade accept length.
@@ -2001,10 +2005,39 @@ class DeepseekV2Model(nn.Module):
             else None
         )
 
-        if nsa_use_prefill_cp(forward_batch):
+        if is_prefill_cp(forward_batch):
             if self.pp_group.is_first_rank:
                 hidden_states = cp_split_and_rebuild_data(forward_batch, hidden_states)
             positions = cp_split_and_rebuild_position(forward_batch, positions)
+
+        actual_num_tokens = None
+        if (
+            forward_batch.forward_mode.is_extend()
+            and forward_batch.extend_prefix_lens is not None
+            and forward_batch.seq_lens is not None
+        ):
+            actual_num_tokens = int(
+                torch.sum(forward_batch.seq_lens - forward_batch.extend_prefix_lens).item()
+            )
+        elif (
+            forward_batch.forward_mode.is_extend()
+            and forward_batch.extend_seq_lens_cpu is not None
+        ):
+            actual_num_tokens = sum(forward_batch.extend_seq_lens_cpu)
+        elif forward_batch.extend_num_tokens is not None:
+            actual_num_tokens = forward_batch.extend_num_tokens
+
+        needs_trim = actual_num_tokens is not None and (
+            hidden_states.shape[0] > actual_num_tokens
+            or positions.shape[0] > actual_num_tokens
+        )
+        if needs_trim:
+            hidden_states = hidden_states[:actual_num_tokens]
+            positions = positions[:actual_num_tokens]
+            if residual is not None:
+                residual = residual[:actual_num_tokens]
+            if forward_batch.out_cache_loc is not None:
+                forward_batch.out_cache_loc = forward_batch.out_cache_loc[:actual_num_tokens]
 
         # llama_4_scaling: for supporting Mistral-Large-3 model
         # Compute llama 4 scaling once per forward pass if enabled
@@ -2086,7 +2119,7 @@ class DeepseekV2Model(nn.Module):
                 else:
                     hidden_states, _ = self.norm(hidden_states, residual)
 
-        if self.pp_group.is_last_rank and nsa_use_prefill_cp(forward_batch):
+        if self.pp_group.is_last_rank and is_prefill_cp(forward_batch):
             # allgather + rerrange
             hidden_states = cp_all_gather_rerange_output(
                 hidden_states,
@@ -2227,14 +2260,36 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> torch.Tensor:
-        if self.nsa_enable_prefill_cp:
-            if can_cp_split(len(input_ids), self.cp_size, self.use_nsa, forward_batch):
-                forward_batch.nsa_cp_metadata = prepare_input_dp_with_cp_dsa(
-                    len(input_ids),
-                    self.cp_rank,
-                    self.cp_size,
-                    forward_batch.seq_lens_cpu.tolist(),
-                )
+        if is_prefill_context_parallel_enabled():
+            cp_token_len = (
+                forward_batch.extend_num_tokens
+                if forward_batch.extend_num_tokens is not None
+                else len(input_ids)
+            )
+            cp_rank = get_attention_cp_rank()
+            cp_size = get_attention_cp_size()
+            if self.use_nsa and self.nsa_enable_prefill_cp:
+                if nsa_can_cp_split(cp_token_len, cp_size, self.use_nsa, forward_batch):
+                    forward_batch.nsa_cp_metadata = prepare_input_dp_with_cp_dsa(
+                        cp_token_len,
+                        cp_rank,
+                        cp_size,
+                        forward_batch.seq_lens_cpu.tolist(),
+                    )
+            else:
+                if cp_can_cp_split(cp_token_len, cp_size, forward_batch):
+                    # Generic MLA CP path (e.g., Kimi): store metadata under attn_cp_metadata.
+                    seqs_len = (
+                        forward_batch.seq_lens_cpu.tolist()
+                        if forward_batch.seq_lens_cpu is not None
+                        else None
+                    )
+                    forward_batch.attn_cp_metadata = prepare_context_parallel_metadata(
+                        kv_len=cp_token_len,
+                        cp_rank=cp_rank,
+                        cp_size=cp_size,
+                        seqs_len=seqs_len,
+                    )
 
         with get_attn_tp_context().maybe_input_scattered(forward_batch):
             hidden_states = self.model(

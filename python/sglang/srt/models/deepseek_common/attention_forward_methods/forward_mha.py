@@ -212,6 +212,8 @@ class DeepseekMHAForwardMixin:
 
         k_pe = latent_cache[:, :, self.kv_lora_rank :]
         if self.rotary_emb is not None:
+            if positions.shape[0] != q_pe.shape[0]:
+                positions = positions[: q_pe.shape[0]]
             q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
         q[..., self.qk_nope_head_dim :] = q_pe
 
