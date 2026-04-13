@@ -196,6 +196,7 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
         page_size: int,
         vocab_mask: Optional[torch.Tensor] = None,  # For grammar
     ) -> torch.Tensor:
+        torch.cuda.synchronize()
         """
         Verify and find accepted tokens based on logits output and batch
         (which contains spec decoding information).
@@ -333,6 +334,7 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             coins_for_final_sampling = torch.rand(
                 (bs,), dtype=torch.float32, device=batch.device
             )
+            torch.cuda.synchronize()    
             tree_speculative_sampling_target_only(
                 predicts=predict,  # mutable
                 accept_index=accept_index,  # mutable
@@ -349,7 +351,7 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 threshold_acc=get_global_server_args().speculative_accept_threshold_acc,
                 deterministic=True,
             )
-
+        torch.cuda.synchronize()
         if SIMULATE_ACC_LEN > 0.0:
             # Do simulation
             accept_index = generate_simulated_accept_index(

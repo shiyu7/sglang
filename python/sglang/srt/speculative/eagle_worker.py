@@ -686,9 +686,11 @@ class EAGLEWorker(TpModelWorker):
             ).cpu()
 
         # Forward
+        torch.cuda.synchronize()
         batch_result = self.target_worker.forward_batch_generation(
             model_worker_batch, is_verify=True
         )
+        torch.cuda.synchronize()
         logits_output, can_run_cuda_graph = (
             batch_result.logits_output,
             batch_result.can_run_cuda_graph,
