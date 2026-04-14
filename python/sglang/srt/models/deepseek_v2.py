@@ -2006,6 +2006,24 @@ class DeepseekV2Model(nn.Module):
                 hidden_states = cp_split_and_rebuild_data(forward_batch, hidden_states)
             positions = cp_split_and_rebuild_position(forward_batch, positions)
 
+        actual_num_tokens = None
+        if (
+            forward_batch.forward_mode.is_extend()
+            and forward_batch.extend_prefix_lens is not None
+            and forward_batch.seq_lens is not None
+        ):
+            actual_num_tokens = int(
+                torch.sum(forward_batch.seq_lens - forward_batch.extend_prefix_lens).item()
+            )
+        elif forward_batch.extend_num_tokens is not None:
+            actual_num_tokens = forward_batch.extend_num_tokens
+
+        if actual_num_tokens is not None and hidden_states.shape[0] > actual_num_tokens:
+            hidden_states = hidden_states[:actual_num_tokens]
+            positions = positions[:actual_num_tokens]
+            if residual is not None:
+                residual = residual[:actual_num_tokens]
+
         # llama_4_scaling: for supporting Mistral-Large-3 model
         # Compute llama 4 scaling once per forward pass if enabled
         llama_4_scaling: Optional[torch.Tensor] = None
