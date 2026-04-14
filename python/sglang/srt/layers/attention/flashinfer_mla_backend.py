@@ -119,15 +119,7 @@ class FlashInferMhaChunkKVRunner:
         qo_indptr = self.qo_indptr
         qo_indptr[1 : bs + 1] = torch.cumsum(seq_lens - prefix_lens, dim=0)
         qo_indptr = qo_indptr[: bs + 1]
-        self.expected_q_tokens = (
-            forward_batch.extend_num_tokens
-            if forward_batch.extend_num_tokens is not None
-            else (
-                sum(forward_batch.extend_seq_lens_cpu)
-                if forward_batch.extend_seq_lens_cpu is not None
-                else None
-            )
-        )
+        self.expected_q_tokens = int(qo_indptr[-1].item())
 
         for chunk_idx in range(forward_batch.num_prefix_chunks):
             # MHA for chunked prefix kv cache when running model with MLA
@@ -173,17 +165,18 @@ class FlashInferMhaChunkKVRunner:
         layer: RadixAttention,
         forward_batch: ForwardBatch,
     ):
-        if self.expected_q_tokens is not None and q.shape[0] != self.expected_q_tokens:
-            if q.shape[0] < self.expected_q_tokens:
+        expected_q_tokens = self.expected_q_tokens
+        if expected_q_tokens is not None and q.shape[0] != expected_q_tokens:
+            if q.shape[0] < expected_q_tokens:
                 raise ValueError(
                     f"q has fewer tokens than expected in MLA chunk prefill: "
-                    f"{q.shape[0]} < {self.expected_q_tokens}"
+                    f"{q.shape[0]} < {expected_q_tokens}"
                 )
             # CP/DP padding may append a few trailing tokens to the model input, while
             # ragged FlashInfer wrappers expect only the real extend tokens.
-            q = q[: self.expected_q_tokens]
-            k = k[: self.expected_q_tokens]
-            v = v[: self.expected_q_tokens]
+            q = q[:expected_q_tokens]
+            k = k[:expected_q_tokens]
+            v = v[:expected_q_tokens]
 
         logits_soft_cap = layer.logit_cap
         if forward_batch.attn_attend_prefix_cache:
