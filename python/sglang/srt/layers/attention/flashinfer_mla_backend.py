@@ -354,7 +354,7 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                 prefix_lens,
                 prefill_wrapper_paged=self.prefill_wrapper_paged,
                 use_ragged=use_ragged,
-                padded_qo_len=forward_batch.extend_num_tokens if use_ragged else None,
+                padded_qo_len=None,
             )
             self.forward_metadata = PrefillMetadata(
                 self.prefill_wrapper_paged, use_ragged
@@ -1044,15 +1044,6 @@ class FlashInferMLAIndicesUpdaterPrefill:
                     self.req_to_token,
                 )
             )
-
-        if use_ragged and padded_qo_len is not None:
-            actual_qo_tokens = int(qo_indptr[-1].item())
-            if padded_qo_len > actual_qo_tokens:
-                # DP/TP sync may pad extend tokens (e.g. 44 -> 48). Append one dummy
-                # request for the padded tail so flashinfer's shape check matches q.shape[0].
-                qo_indptr = torch.cat(
-                    [qo_indptr, qo_indptr.new_tensor([padded_qo_len])]
-                )
 
         # #region debug-point A:prefill-metadata
         try:
