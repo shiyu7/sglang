@@ -110,9 +110,34 @@ def is_prefill_cp_round_robin_split():
     )
 
 
+def _prefill_cp_is_single_seq_batch(forward_batch) -> bool:
+    """Prefill CP currently only supports a single sequence per batch.
+
+    Online serving often batches multiple requests into one extend. If CP is
+    mistakenly enabled for such multi-request batches, the CP metadata and token
+    mapping become invalid and can silently corrupt outputs (accuracy collapse).
+    """
+    if forward_batch is None:
+        return False
+    bs = getattr(forward_batch, "batch_size", None)
+    if bs is not None and bs != 1:
+        return False
+    # Be conservative: require CPU-side per-seq lengths to be single-element when present.
+    seq_lens_cpu = getattr(forward_batch, "seq_lens_cpu", None)
+    if seq_lens_cpu is not None and len(seq_lens_cpu) != 1:
+        return False
+    extend_seq_lens_cpu = getattr(forward_batch, "extend_seq_lens_cpu", None)
+    if extend_seq_lens_cpu is not None and len(extend_seq_lens_cpu) != 1:
+        return False
+    return True
+
+
+
 def can_prefill_cp_round_robin_split(forward_batch) -> bool:
     """Token-level round-robin split feasibility check."""
     if not forward_batch.forward_mode.is_context_parallel_extend():
+        return False
+    if not _prefill_cp_is_single_seq_batch(forward_batch):
         return False
     cp_size = get_attention_cp_size()
     seq_len = sum(forward_batch.extend_seq_lens_cpu) if forward_batch.extend_seq_lens_cpu is not None else 0
@@ -141,6 +166,8 @@ def is_prefill_cp(forward_batch) -> bool:
     """
     if forward_batch is None:
         return False
+    if not _prefill_cp_is_single_seq_batch(forward_batch):
+        return False
     has_cp_meta = (
         getattr(forward_batch, "attn_cp_metadata", None) is not None
         or getattr(forward_batch, "nsa_cp_metadata", None) is not None
@@ -155,6 +182,8 @@ def is_prefill_cp(forward_batch) -> bool:
 def can_cp_split(seq_len: int, cp_size: int, forward_batch):
     # Round-robin mode feasibility is determined by per-seq lengths and CP size.
     # Keep `seq_len` for API compatibility; the decision mainly relies on batch metadata.
+    if not _prefill_cp_is_single_seq_batch(forward_batch):
+        return False
     if is_prefill_cp_round_robin_split():
         return can_prefill_cp_round_robin_split(forward_batch)
     # TODO current just support prefill batch=1 and len(input_ids) > self.cp_size * 2
