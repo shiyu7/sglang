@@ -2254,17 +2254,22 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
     @torch.no_grad()
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> torch.Tensor:
-        if is_prefill_context_parallel_enabled():
+        if (
+            is_prefill_context_parallel_enabled()
+            and forward_batch.forward_mode.is_context_parallel_extend()
+        ):
+            # `input_ids` can be None when the caller provides `input_embeds` only.
+            # Use `extend_num_tokens` when available; otherwise fall back to positions.
             cp_token_len = (
                 forward_batch.extend_num_tokens
                 if forward_batch.extend_num_tokens is not None
-                else len(input_ids)
+                else int(positions.numel())
             )
             cp_rank = get_attention_cp_rank()
             cp_size = get_attention_cp_size()
