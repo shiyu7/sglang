@@ -11,11 +11,11 @@ More details can be found in https://docs.flashinfer.ai/api/mla.html
 
 from dataclasses import dataclass
 from functools import partial
+import sys
 from typing import TYPE_CHECKING, Callable, Optional, Union
 
+import os
 import torch
-
-from sglang.kernel_api_logging import debug_kernel_api
 from sglang.srt.compilation.piecewise_context_manager import (
     get_forward_context,
     is_in_piecewise_cuda_graph,
@@ -74,6 +74,106 @@ class PrefillMetadata:
 
 # Reuse this workspace buffer across all flashinfer wrappers
 global_workspace_buffer = None
+
+
+_mla_debug_print_count = 0
+
+
+def _mla_debug_print(header: str, *, tensors: dict[str, torch.Tensor] | None = None):
+    """Print a small, copyable debug snapshot without spamming warmup."""
+    global _mla_debug_print_count
+    enabled = os.environ.get("SGLANG_MLA_DEBUG_PRINT", "0") == "1"
+    max_calls = int(os.environ.get("SGLANG_MLA_DEBUG_PRINT_CALLS", "1"))
+    if not enabled:
+        return
+    if _mla_debug_print_count >= max_calls:
+        return
+    _mla_debug_print_count += 1
+
+    print(
+        f"[SGLANG_MLA_DEBUG_PRINT] pid={os.getpid()} count={_mla_debug_print_count} {header}",
+        file=sys.stderr,
+        flush=True,
+    )
+    try:
+        fwd_ctx = get_forward_context()
+        if fwd_ctx is not None:
+            fb = fwd_ctx.forward_batch
+            print(
+                f"[SGLANG_MLA_DEBUG_PRINT] pcg_num_tokens={fwd_ctx.num_tokens} "
+                f"extend_num_tokens={getattr(fb, 'extend_num_tokens', None)} "
+                f"forward_mode={getattr(fb, 'forward_mode', None)}",
+                file=sys.stderr,
+                flush=True,
+            )
+        print(
+            f"[SGLANG_MLA_DEBUG_PRINT] is_in_piecewise_cuda_graph={is_in_piecewise_cuda_graph()}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception as exc:
+        print(
+            f"[SGLANG_MLA_DEBUG_PRINT] forward_context_unavailable: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    if not tensors:
+        return
+
+    for name, t in tensors.items():
+        if t is None:
+            print(
+                f"[SGLANG_MLA_DEBUG_PRINT] {name}=None",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+        if not isinstance(t, torch.Tensor):
+            print(
+                f"[SGLANG_MLA_DEBUG_PRINT] {name}=(non-tensor) {type(t).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+        try:
+            print(
+                f"[SGLANG_MLA_DEBUG_PRINT] {name}: "
+                f"shape={tuple(t.shape)} dtype={t.dtype} device={t.device} "
+                f"contig={t.is_contiguous()} stride={t.stride()}",
+                file=sys.stderr,
+                flush=True,
+            )
+            # These ops may synchronize; keep them minimal and only when enabled.
+            if t.numel() > 0:
+                tail = int(t.reshape(-1)[-1].item())
+                head = int(t.reshape(-1)[0].item())
+                print(
+                    f"[SGLANG_MLA_DEBUG_PRINT] {name}: first={head} last={tail}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if t.dtype in (torch.int32, torch.int64):
+                    t_max = int(t.max().item())
+                    t_min = int(t.min().item())
+                    print(
+                        f"[SGLANG_MLA_DEBUG_PRINT] {name}: min={t_min} max={t_max}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                # Print a short prefix for copy/paste (avoid huge prints).
+                prefix = t.reshape(-1)[:64].detach().to("cpu").tolist()
+                print(
+                    f"[SGLANG_MLA_DEBUG_PRINT] {name}: prefix64={prefix}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                f"[SGLANG_MLA_DEBUG_PRINT] {name}: print_failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 class FlashInferMhaChunkKVRunner:
@@ -530,7 +630,6 @@ class FlashInferMLAAttnBackend(AttentionBackend):
         """Init the metadata for a forward pass."""
         self.mha_chunk_kv_cache.update_wrapper(forward_batch, disable_flashinfer_ragged)
 
-    @debug_kernel_api
     def forward_extend(
         self,
         q: torch.Tensor,
@@ -743,6 +842,15 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                 )
             else:
                 o = q.new_empty(q.shape)
+                _mla_debug_print(
+                    "before BatchMLAPagedAttentionWrapper.run (prefill paged MLA path)",
+                    tensors={
+                        "q_nope": q,
+                        "q_rope": q_rope,
+                        "k_nope_buf": k_buf[:, :, : layer.v_head_dim],
+                        "k_rope_buf": k_buf[:, :, layer.v_head_dim :],
+                    },
+                )
                 o = prefill_wrapper_paged.run(
                     q,
                     q_rope,
@@ -973,7 +1081,6 @@ class FlashInferMLAIndicesUpdaterPrefill:
             spec_info,
         )
 
-    @debug_kernel_api
     def call_begin_forward(
         self,
         wrapper_ragged: BatchPrefillWithRaggedKVCacheWrapper,
@@ -1050,6 +1157,17 @@ class FlashInferMLAIndicesUpdaterPrefill:
                     [kv_indptr, kv_indptr.new_tensor([kv_start + extra_kv])]
                 )
                 bs_eff = bs + 1
+
+            _mla_debug_print(
+                "after building MLA prefill metadata (before plan)",
+                tensors={
+                    "seq_lens": seq_lens,
+                    "prefix_lens": prefix_lens if prefix_lens is not None else None,
+                    "qo_indptr": qo_indptr,
+                    "kv_indptr": kv_indptr,
+                    "kv_indices": kv_indices,
+                },
+            )
         else:
             # SpecInput provides KV indices/indptr; still compute qo_indptr from seq lengths.
             kv_indptr, kv_indices = spec_info.kv_indptr, spec_info.kv_indices
