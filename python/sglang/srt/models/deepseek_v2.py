@@ -1525,9 +1525,11 @@ class DeepseekV2AttentionMLA(
         # support allgather+rerrange
         latent_cache[..., : self.kv_lora_rank] = k_nope.squeeze(1)
         latent_cache[..., self.kv_lora_rank :] = k_pe.squeeze(1)
+        # `cp_size` is not an attribute for all MLA models; use runtime CP group size.
+        cp_size = get_attention_cp_size()
         latent_cache_output = cp_all_gather_rerange_output(
             latent_cache.contiguous(),
-            self.cp_size,
+            cp_size,
             forward_batch,
             torch.cuda.current_stream(),
         )
