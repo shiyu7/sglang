@@ -684,14 +684,67 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                     qall[:, :, : layer.v_head_dim],
                     qall[:, :, layer.v_head_dim :],
                 )
-            o = q.new_empty(q.shape)
-            o = prefill_wrapper_paged.run(
-                q,
-                q_rope,
-                k_buf[:, :, : layer.v_head_dim],
-                k_buf[:, :, layer.v_head_dim :],
-                out=o,
-            )
+            if use_prefill_cp and not is_prefill_cp_round_robin_split():
+                # CP + paged MLA: the wrapper.plan done in init_forward_metadata is
+                # for the global qo_indptr. In CP, each rank holds only a q chunk,
+                # so we must re-plan per-half using CP-provided kv_len (prefix-aware).
+                if not hasattr(self, "_prefill_wrapper_paged_cp"):
+                    self._prefill_wrapper_paged_cp = BatchMLAPagedAttentionWrapper(
+                        self.workspace_buffer, backend="auto"
+                    )
+
+                k_nope_buf = k_buf[:, :, : layer.v_head_dim]
+                k_rope_buf = k_buf[:, :, layer.v_head_dim :]
+                q_all = torch.cat([q, q_rope], dim=-1)
+
+                def _cp_paged_mla_attn(
+                    q_chunk, _cu_seqlens_q_cp, cache_seqlens_cp, _max_seqlen_q_cp
+                ):
+                    kv_len = int(cache_seqlens_cp[0].item())
+                    qo_indptr = torch.tensor(
+                        [0, q_chunk.shape[0]],
+                        device=q_chunk.device,
+                        dtype=torch.int32,
+                    )
+                    kv_indptr = torch.tensor(
+                        [0, kv_len], device=q_chunk.device, dtype=torch.int32
+                    )
+                    paged_kernel_lens = torch.tensor(
+                        [kv_len], device=q_chunk.device, dtype=torch.int32
+                    )
+                    # Plan a temporary wrapper for this (q_chunk, kv_len) pair.
+                    self.indices_updater_decode.call_begin_forward(
+                        self._prefill_wrapper_paged_cp,
+                        forward_batch.req_pool_indices[:1],
+                        paged_kernel_lens,
+                        kv_len,
+                        qo_indptr,
+                        kv_indptr,
+                        init_metadata_replay=False,
+                        spec_info=None,
+                    )
+                    q_nope = q_chunk[:, :, : layer.v_head_dim]
+                    q_rope = q_chunk[:, :, layer.v_head_dim :]
+                    o_chunk = q_nope.new_empty(q_nope.shape)
+                    return self._prefill_wrapper_paged_cp.run(
+                        q_nope, q_rope, k_nope_buf, k_rope_buf, out=o_chunk
+                    )
+
+                o = cp_attn_forward_extend(
+                    forward_batch,
+                    q_all,
+                    q.device,
+                    _cp_paged_mla_attn,
+                )
+            else:
+                o = q.new_empty(q.shape)
+                o = prefill_wrapper_paged.run(
+                    q,
+                    q_rope,
+                    k_buf[:, :, : layer.v_head_dim],
+                    k_buf[:, :, layer.v_head_dim :],
+                    out=o,
+                )
 
         return o.view(-1, layer.tp_q_head_num * layer.v_head_dim)
 
@@ -816,8 +869,9 @@ class FlashInferMLAIndicesUpdaterDecode:
         if spec_info is None:
             kv_indptr[1 : bs + 1] = torch.cumsum(paged_kernel_lens, dim=0)
             kv_indptr = kv_indptr[: bs + 1]
+            device = self.attn_backend.device
             kv_indices = (
-                torch.empty(paged_kernel_lens_sum, dtype=torch.int32, device="cuda")
+                torch.empty(paged_kernel_lens_sum, dtype=torch.int32, device=device)
                 if not init_metadata_replay
                 else fast_decode_kwargs["kv_indices"]
             )
