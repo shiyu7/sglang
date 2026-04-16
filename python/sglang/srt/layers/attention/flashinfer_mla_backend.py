@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Callable, Optional, Union
 
 import torch
 
+from sglang.kernel_api_logging import debug_kernel_api
 from sglang.srt.compilation.piecewise_context_manager import (
     get_forward_context,
     is_in_piecewise_cuda_graph,
@@ -529,6 +530,7 @@ class FlashInferMLAAttnBackend(AttentionBackend):
         """Init the metadata for a forward pass."""
         self.mha_chunk_kv_cache.update_wrapper(forward_batch, disable_flashinfer_ragged)
 
+    @debug_kernel_api
     def forward_extend(
         self,
         q: torch.Tensor,
@@ -971,6 +973,7 @@ class FlashInferMLAIndicesUpdaterPrefill:
             spec_info,
         )
 
+    @debug_kernel_api
     def call_begin_forward(
         self,
         wrapper_ragged: BatchPrefillWithRaggedKVCacheWrapper,
