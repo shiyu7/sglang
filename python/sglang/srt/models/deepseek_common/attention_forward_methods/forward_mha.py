@@ -9,6 +9,8 @@ from sglang.srt.layers.attention.nsa.dequant_k_cache import dequantize_k_cache_p
 from sglang.srt.layers.attention.tbo_backend import TboAttnBackend
 from sglang.srt.layers.attention.utils import concat_and_cast_mha_k_triton
 from sglang.srt.layers.communicator import get_attn_tp_context
+from sglang.srt.layers.dp_attention import get_attention_cp_size
+from sglang.srt.layers.utils.cp_utils import cp_allgather_and_save_mla_kv_cache, is_prefill_cp
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.models.deepseek_common.utils import (
     _is_cuda,
@@ -414,6 +416,17 @@ class DeepseekMHAForwardMixin:
         k_pe: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
+        if is_prefill_cp(forward_batch):
+            # CP contract: `out_cache_loc` is global-token aligned. Don't write
+            # per-rank KV directly; allgather+rerrange then write the full result.
+            cp_allgather_and_save_mla_kv_cache(
+                forward_batch,
+                self.attn_mha,
+                kv_a.unsqueeze(1),
+                k_pe,
+                get_attention_cp_size(),
+            )
+            return
         if _is_cuda or _use_aiter_gfx95:
             # Save latent cache
             forward_batch.token_to_kv_pool.set_mla_kv_buffer(
