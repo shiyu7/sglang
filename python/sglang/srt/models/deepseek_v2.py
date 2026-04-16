@@ -1846,10 +1846,11 @@ class DeepseekV2Model(nn.Module):
         self.first_k_dense_replace = config.first_k_dense_replace
         self.pp_group = get_pp_group()
         self.nsa_enable_prefill_cp = is_nsa_enable_prefill_cp()
-        if self.nsa_enable_prefill_cp:
-            self.cp_size = get_attention_cp_size()
-        else:
-            self.cp_size = None
+        # Keep `cp_size` consistent across NSA and generic MLA CP. When CP is
+        # disabled, leave it as None to avoid accidental CP paths.
+        self.cp_size = (
+            get_attention_cp_size() if is_prefill_context_parallel_enabled() else None
+        )
 
         if self.pp_group.is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -2191,7 +2192,7 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
         self.capture_aux_hidden_states = False
 
         self.nsa_enable_prefill_cp = is_nsa_enable_prefill_cp()
-        if self.nsa_enable_prefill_cp:
+        if is_prefill_context_parallel_enabled():
             self.cp_rank = get_attention_cp_rank()
             self.cp_size = get_attention_cp_size()
         else:
