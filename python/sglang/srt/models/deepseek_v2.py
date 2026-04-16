@@ -2012,13 +2012,6 @@ class DeepseekV2Model(nn.Module):
             if self.pp_group.is_first_rank:
                 hidden_states = cp_split_and_rebuild_data(forward_batch, hidden_states)
             positions = cp_split_and_rebuild_position(forward_batch, positions)
-            # Keep cache locations aligned with the CP-split token order/length.
-            # This is critical for round-robin split where the per-rank token
-            # count differs; otherwise KV writes can OOB-read the source tensors.
-            if forward_batch.out_cache_loc is not None:
-                forward_batch.out_cache_loc = cp_split_and_rebuild_data(
-                    forward_batch, forward_batch.out_cache_loc
-                )
 
         actual_num_tokens = None
         if (
