@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING, Callable, Optional, Union
 
 import torch
 
-from sglang.srt.compilation.piecewise_context_manager import is_in_piecewise_cuda_graph
+from sglang.srt.compilation.piecewise_context_manager import (
+    get_forward_context,
+    is_in_piecewise_cuda_graph,
+)
 from sglang.srt.environ import envs
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.flashinfer_backend import (
@@ -999,8 +1002,27 @@ class FlashInferMLAIndicesUpdaterPrefill:
 
             qo_indptr[1 : bs + 1] = torch.cumsum(qo_lens, dim=0)
             qo_indptr = qo_indptr[: bs + 1]
+
+            # Piecewise CUDA graph padding:
+            # In PCG, input_ids are padded to a static token count, so q.shape[0] can be
+            # larger than the real extend tokens (sum(qo_lens)). FlashInfer expects
+            # qo_indptr[-1] to match q.shape[0], otherwise it may read invalid KV indices.
+            # Append a dummy request for the padding tokens; map its KV to slot 0 (scratch).
+            fwd_ctx = get_forward_context()
+            pcg_num_tokens = fwd_ctx.num_tokens if fwd_ctx is not None else None
+            actual_qo_tokens = (
+                fwd_ctx.forward_batch.extend_num_tokens if fwd_ctx is not None else None
+            )
+            extra_kv = 0
+            if (
+                pcg_num_tokens is not None
+                and actual_qo_tokens is not None
+                and pcg_num_tokens > actual_qo_tokens
+            ):
+                extra_kv = pcg_num_tokens - actual_qo_tokens
+
             kv_indices = torch.empty(
-                paged_kernel_lens_sum,
+                paged_kernel_lens_sum + extra_kv,
                 dtype=torch.int32,
                 device=req_pool_indices.device,
             )
@@ -1013,6 +1035,18 @@ class FlashInferMLAIndicesUpdaterPrefill:
                 kv_indices,
                 self.req_to_token.shape[1],
             )
+
+            bs_eff = bs
+            if extra_kv > 0:
+                kv_start = paged_kernel_lens_sum  # equals kv_indptr[-1] (no .item() needed)
+                kv_indices[kv_start : kv_start + extra_kv] = 0
+                qo_indptr = torch.cat(
+                    [qo_indptr, qo_indptr.new_tensor([pcg_num_tokens])]
+                )
+                kv_indptr = torch.cat(
+                    [kv_indptr, kv_indptr.new_tensor([kv_start + extra_kv])]
+                )
+                bs_eff = bs + 1
         else:
             # SpecInput provides KV indices/indptr; still compute qo_indptr from seq lengths.
             kv_indptr, kv_indices = spec_info.kv_indptr, spec_info.kv_indices
@@ -1040,8 +1074,8 @@ class FlashInferMLAIndicesUpdaterPrefill:
             # mla paged prefill
             kv_len_arr = kv_indptr[1:] - kv_indptr[:-1]
             wrapper_paged.plan(
-                qo_indptr[: bs + 1],
-                kv_indptr[: bs + 1],
+                qo_indptr[: bs_eff + 1] if spec_info is None else qo_indptr[: bs + 1],
+                kv_indptr[: bs_eff + 1] if spec_info is None else kv_indptr[: bs + 1],
                 kv_indices,
                 kv_len_arr,
                 self.num_local_heads,
