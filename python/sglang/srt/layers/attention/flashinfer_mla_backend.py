@@ -738,6 +738,61 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                     q.device,
                     _cp_paged_mla_attn,
                 )
+            elif use_prefill_cp and is_prefill_cp_round_robin_split():
+                # CP + round-robin + paged MLA:
+                # each rank owns interleaved query tokens, so a single causal prefill
+                # plan with local q is invalid. Re-plan per token using the global
+                # causal KV length for that token position.
+                if not hasattr(self, "_prefill_wrapper_paged_cp"):
+                    self._prefill_wrapper_paged_cp = BatchMLAPagedAttentionWrapper(
+                        self.workspace_buffer, backend="auto"
+                    )
+
+                k_nope_buf = k_buf[:, :, : layer.v_head_dim]
+                k_rope_buf = k_buf[:, :, layer.v_head_dim :]
+                prefix_len = 0
+                if (
+                    forward_batch.extend_prefix_lens_cpu is not None
+                    and len(forward_batch.extend_prefix_lens_cpu) == 1
+                ):
+                    prefix_len = int(forward_batch.extend_prefix_lens_cpu[0])
+
+                cp_rank = get_attention_cp_rank()
+                outputs = []
+                for token_idx in range(q.shape[0]):
+                    kv_len = prefix_len + cp_rank + token_idx * cp_size + 1
+                    qo_indptr = torch.tensor(
+                        [0, 1], device=q.device, dtype=torch.int32
+                    )
+                    kv_indptr = torch.tensor(
+                        [0, kv_len], device=q.device, dtype=torch.int32
+                    )
+                    paged_kernel_lens = torch.tensor(
+                        [kv_len], device=q.device, dtype=torch.int32
+                    )
+                    self.indices_updater_decode.call_begin_forward(
+                        self._prefill_wrapper_paged_cp,
+                        forward_batch.req_pool_indices[:1],
+                        paged_kernel_lens,
+                        kv_len,
+                        qo_indptr,
+                        kv_indptr,
+                        init_metadata_replay=False,
+                        spec_info=None,
+                    )
+                    q_nope = q[token_idx : token_idx + 1]
+                    q_rope_i = q_rope[token_idx : token_idx + 1]
+                    o_token = q_nope.new_empty(q_nope.shape)
+                    outputs.append(
+                        self._prefill_wrapper_paged_cp.run(
+                            q_nope,
+                            q_rope_i,
+                            k_nope_buf,
+                            k_rope_buf,
+                            out=o_token,
+                        )
+                    )
+                o = torch.cat(outputs, dim=0) if outputs else q.new_empty(q.shape)
             else:
                 o = q.new_empty(q.shape)
                 planned_q_tokens = int(self._last_prefill_qo_indptr[-1].item())
