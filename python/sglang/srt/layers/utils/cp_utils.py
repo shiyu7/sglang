@@ -153,6 +153,10 @@ def is_prefill_cp(forward_batch) -> bool:
 
 
 def can_cp_split(seq_len: int, cp_size: int, forward_batch):
+    # Round-robin mode feasibility is determined by per-seq lengths and CP size.
+    # Keep `seq_len` for API compatibility; the decision mainly relies on batch metadata.
+    if is_prefill_cp_round_robin_split():
+        return can_prefill_cp_round_robin_split(forward_batch)
     # TODO current just support prefill batch=1 and len(input_ids) > self.cp_size * 2
     # Note: (self.cp_size * 2) To achieve load balancing for seq computation,
     # the seq data needs to be divided and recombined at twice the size of cp_size.
@@ -428,6 +432,20 @@ def prepare_context_parallel_metadata(
     cp_size,
     seqs_len,
 ):
+    """Prepare CP metadata based on current prefill CP mode.
+
+    - in-seq-split: build zigzag metadata tensors used by split/rebuild/allgather.
+    - round-robin-split: return a lightweight metadata object to keep a unified
+      `attn_cp_metadata is not None` contract.
+    """
+    if is_prefill_cp_round_robin_split():
+        return prepare_round_robin_context_parallel_metadata(
+            kv_len=kv_len,
+            _cp_rank=cp_rank,
+            _cp_size=cp_size,
+            _seqs_len=seqs_len,
+        )
+
     """prepare_input_dp_with_cp_dsa-zigzag index（in-seq-split）
     Example (DP_ATTENT_TP == CP_SIZE == 4):
     Description:

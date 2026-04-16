@@ -2282,13 +2282,13 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
                         forward_batch.seq_lens_cpu.tolist(),
                     )
             else:
+                # Generic MLA CP path (e.g., Kimi): metadata builder is mode-aware.
+                seqs_len = (
+                    forward_batch.seq_lens_cpu.tolist()
+                    if forward_batch.seq_lens_cpu is not None
+                    else None
+                )
                 if cp_can_cp_split(cp_token_len, cp_size, forward_batch):
-                    # Generic MLA CP path (e.g., Kimi): store metadata under attn_cp_metadata.
-                    seqs_len = (
-                        forward_batch.seq_lens_cpu.tolist()
-                        if forward_batch.seq_lens_cpu is not None
-                        else None
-                    )
                     forward_batch.attn_cp_metadata = prepare_context_parallel_metadata(
                         kv_len=cp_token_len,
                         cp_rank=cp_rank,
