@@ -991,6 +991,7 @@ class Qwen3MoeForCausalLM(nn.Module):
                     self.attn_cp_rank,
                     self.attn_cp_size,
                     forward_batch.seq_lens_cpu.tolist(),
+                    req_pool_indices=forward_batch.req_pool_indices,
                 )
 
         hidden_states = self.model(

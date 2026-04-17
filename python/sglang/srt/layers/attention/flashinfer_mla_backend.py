@@ -27,6 +27,7 @@ from sglang.srt.layers.dp_attention import get_attention_cp_rank, get_attention_
 from sglang.srt.layers.utils.cp_utils import (
     cp_attn_forward_extend,
     cp_use_prefill,
+    get_round_robin_paged_prefill_plan,
     is_prefill_cp_round_robin_split,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
@@ -730,19 +731,18 @@ class FlashInferMLAAttnBackend(AttentionBackend):
             k_buf = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).to(
                 q.dtype
             )
-            def _plan_cp_paged_prefill(q_len: int, kv_len: int, device: torch.device):
-                assert q_len > 0
-                assert kv_len >= q_len
-                seq_lens = torch.tensor([kv_len], device=device, dtype=torch.int32)
-                prefix_lens = torch.tensor(
-                    [kv_len - q_len], device=device, dtype=torch.int32
-                )
+            def _plan_cp_paged_prefill(
+                req_pool_indices: torch.Tensor,
+                seq_lens: torch.Tensor,
+                prefix_lens: torch.Tensor,
+            ):
+                assert seq_lens.numel() > 0
                 self.indices_updater_prefill.call_begin_forward(
                     self.prefill_wrapper_ragged,
                     self._prefill_wrapper_paged_cp,
-                    forward_batch.req_pool_indices[:1],
+                    req_pool_indices,
                     seq_lens,
-                    kv_len,
+                    int(seq_lens.sum().item()),
                     seq_lens,
                     prefix_lens,
                     self.indices_updater_prefill.kv_indptr,
@@ -774,7 +774,15 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                 ):
                     kv_len = int(cache_seqlens_cp[0].item())
                     # Re-plan using prefill semantics for the local CP chunk.
-                    _plan_cp_paged_prefill(q_chunk.shape[0], kv_len, q_chunk.device)
+                    _plan_cp_paged_prefill(
+                        forward_batch.req_pool_indices[:1],
+                        torch.tensor([kv_len], device=q_chunk.device, dtype=torch.int32),
+                        torch.tensor(
+                            [kv_len - q_chunk.shape[0]],
+                            device=q_chunk.device,
+                            dtype=torch.int32,
+                        ),
+                    )
                     q_nope = q_chunk[:, :, : layer.v_head_dim]
                     q_rope = q_chunk[:, :, layer.v_head_dim :]
                     o_chunk = q_nope.new_empty(q_nope.shape)
@@ -790,9 +798,8 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                 )
             elif use_prefill_cp and is_prefill_cp_round_robin_split():
                 # CP + round-robin + paged MLA:
-                # each rank owns interleaved query tokens, so a single causal prefill
-                # plan with local q is invalid. Re-plan per token using the global
-                # causal KV length for that token position.
+                # consume precomputed local prefill metadata prepared upstream in
+                # cp_utils, so the backend only runs a standard paged prefill.
                 if not hasattr(self, "_prefill_wrapper_paged_cp"):
                     self._prefill_wrapper_paged_cp = BatchMLAPagedAttentionWrapper(
                         self.workspace_buffer, backend="auto"
@@ -800,14 +807,18 @@ class FlashInferMLAAttnBackend(AttentionBackend):
 
                 k_nope_buf = k_buf[:, :, : layer.v_head_dim]
                 k_rope_buf = k_buf[:, :, layer.v_head_dim :]
-                prefix_len = 0
-                if (
-                    forward_batch.extend_prefix_lens_cpu is not None
-                    and len(forward_batch.extend_prefix_lens_cpu) == 1
-                ):
-                    prefix_len = int(forward_batch.extend_prefix_lens_cpu[0])
-
                 cp_rank = get_attention_cp_rank()
+                (
+                    rr_req_pool_indices,
+                    rr_seq_lens,
+                    rr_prefix_lens,
+                    rr_qo_indptr,
+                ) = get_round_robin_paged_prefill_plan(forward_batch)
+                prefix_len = (
+                    int(rr_prefix_lens[0].item()) - cp_rank
+                    if rr_prefix_lens.numel() > 0
+                    else 0
+                )
                 # #region debug-point B:rr-mla-branch
                 try:
                     import json, os, time, urllib.request
@@ -826,6 +837,9 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                             "local_q_len": int(q.shape[0]),
                             "k_buf_len": int(k_buf.shape[0]),
                             "prefix_len": int(prefix_len),
+                                "rr_seq_lens_head": rr_seq_lens[
+                                    : min(4, rr_seq_lens.shape[0])
+                                ].tolist(),
                             "req_pool_indices": forward_batch.req_pool_indices[:1].tolist()
                             if getattr(forward_batch, "req_pool_indices", None) is not None
                             else None,
@@ -873,10 +887,15 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                 except Exception:
                     pass
                 # #endregion
-                outputs = []
-                for token_idx in range(q.shape[0]):
-                    kv_len = prefix_len + cp_rank + token_idx * cp_size + 1
-                    if token_idx < 2 or token_idx == q.shape[0] - 1:
+                if q.shape[0] > 0:
+                    assert rr_req_pool_indices is not None
+                    assert q.shape[0] == int(rr_qo_indptr[-1].item()), (
+                        "Round-robin MLA paged prefill q token count mismatch: "
+                        f"q.shape[0]={q.shape[0]}, rr_qo_indptr[-1]={int(rr_qo_indptr[-1].item())}"
+                    )
+                    sample_indices = {0, min(1, q.shape[0] - 1), q.shape[0] - 1}
+                    for token_idx in sorted(sample_indices):
+                        kv_len = int(rr_seq_lens[token_idx].item())
                         # #region debug-point D:rr-mla-kvlen
                         try:
                             import json, os, time, urllib.request
@@ -891,7 +910,7 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                                 "data": {
                                     "token_idx": int(token_idx),
                                     "global_token_idx": int(cp_rank + token_idx * cp_size),
-                                    "kv_len": int(kv_len),
+                                    "kv_len": kv_len,
                                     "prefix_len": int(prefix_len),
                                     "cp_rank": int(cp_rank),
                                     "cp_size": int(cp_size),
@@ -941,20 +960,19 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                         except Exception:
                             pass
                         # #endregion
-                    _plan_cp_paged_prefill(1, kv_len, q.device)
-                    q_nope = q[token_idx : token_idx + 1]
-                    q_rope_i = q_rope[token_idx : token_idx + 1]
-                    o_token = q_nope.new_empty(q_nope.shape)
-                    outputs.append(
-                        self._prefill_wrapper_paged_cp.run(
-                            q_nope,
-                            q_rope_i,
-                            k_nope_buf,
-                            k_rope_buf,
-                            out=o_token,
-                        )
+                    _plan_cp_paged_prefill(
+                        rr_req_pool_indices, rr_seq_lens, rr_prefix_lens
                     )
-                o = torch.cat(outputs, dim=0) if outputs else q.new_empty(q.shape)
+                    o = q.new_empty(q.shape)
+                    o = self._prefill_wrapper_paged_cp.run(
+                        q,
+                        q_rope,
+                        k_nope_buf,
+                        k_rope_buf,
+                        out=o,
+                    )
+                else:
+                    o = q.new_empty(q.shape)
             else:
                 o = q.new_empty(q.shape)
                 planned_q_tokens = int(self._last_prefill_qo_indptr[-1].item())

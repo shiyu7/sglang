@@ -2349,6 +2349,7 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
                         cp_rank=cp_rank,
                         cp_size=cp_size,
                         seqs_len=seqs_len,
+                        req_pool_indices=forward_batch.req_pool_indices,
                     )
                 # #region debug-point C:cp-metadata-build
                 try:

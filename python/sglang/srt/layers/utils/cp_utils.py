@@ -35,6 +35,12 @@ class ContextParallelMetadata:
 
     total_seq_lens: torch.Tensor = None
 
+    # round-robin paged prefill metadata
+    rr_qo_indptr_tensor: torch.Tensor = None
+    rr_seq_lens_tensor: torch.Tensor = None
+    rr_prefix_lens_tensor: torch.Tensor = None
+    rr_req_pool_indices_tensor: torch.Tensor = None
+
 
 def get_context_parallel_metadata(forward_batch) -> ContextParallelMetadata:
     metadata = getattr(forward_batch, "attn_cp_metadata", None)
@@ -43,6 +49,73 @@ def get_context_parallel_metadata(forward_batch) -> ContextParallelMetadata:
     if metadata is None:
         raise ValueError("Context parallel metadata is not initialized for this batch.")
     return metadata
+
+
+def _get_cp_metadata_device(device: torch.device | None = None) -> torch.device:
+    if device is not None:
+        return device
+    if torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cpu")
+
+
+def build_round_robin_prefill_plan(
+    *,
+    extend_len: int,
+    prefix_len: int,
+    cp_rank: int,
+    cp_size: int,
+    req_pool_indices: torch.Tensor | None = None,
+    device: torch.device | None = None,
+):
+    """Build per-local-token prefill metadata for round-robin CP.
+
+    For one single-sequence extend, token `global_idx` is assigned to
+    `cp_rank = global_idx % cp_size`. Each local query token therefore observes
+    a different visible KV length. We precompute those per-token lengths here so
+    the attention backend can consume a standard prefill batch interface.
+    """
+    device = _get_cp_metadata_device(device)
+    local_q_len = extend_len // cp_size + int(extend_len % cp_size > cp_rank)
+    if local_q_len <= 0:
+        rr_qo_indptr_tensor = torch.tensor([0], device=device, dtype=torch.int32)
+        rr_seq_lens_tensor = torch.empty(0, device=device, dtype=torch.int32)
+        rr_prefix_lens_tensor = torch.empty(0, device=device, dtype=torch.int32)
+    else:
+        local_token_idx = torch.arange(local_q_len, device=device, dtype=torch.int32)
+        rr_global_token_idx_tensor = cp_rank + local_token_idx * cp_size
+        rr_qo_indptr_tensor = torch.arange(
+            local_q_len + 1, device=device, dtype=torch.int32
+        )
+        rr_seq_lens_tensor = prefix_len + rr_global_token_idx_tensor + 1
+        rr_prefix_lens_tensor = rr_seq_lens_tensor - 1
+
+    rr_req_pool_indices_tensor = None
+    if req_pool_indices is not None:
+        req_pool_indices = req_pool_indices.to(device=device)
+        if req_pool_indices.numel() > 0:
+            rr_req_pool_indices_tensor = req_pool_indices[:1].repeat(local_q_len)
+        else:
+            rr_req_pool_indices_tensor = req_pool_indices.new_empty((0,))
+
+    return {
+        "rr_qo_indptr_tensor": rr_qo_indptr_tensor,
+        "rr_seq_lens_tensor": rr_seq_lens_tensor,
+        "rr_prefix_lens_tensor": rr_prefix_lens_tensor,
+        "rr_req_pool_indices_tensor": rr_req_pool_indices_tensor,
+    }
+
+
+def get_round_robin_paged_prefill_plan(forward_batch) -> tuple[torch.Tensor, ...]:
+    metadata = get_context_parallel_metadata(forward_batch)
+    if metadata.rr_seq_lens_tensor is None or metadata.rr_prefix_lens_tensor is None:
+        raise ValueError("Round-robin paged prefill metadata is not initialized.")
+    return (
+        metadata.rr_req_pool_indices_tensor,
+        metadata.rr_seq_lens_tensor,
+        metadata.rr_prefix_lens_tensor,
+        metadata.rr_qo_indptr_tensor,
+    )
 
 
 def build_zigzag_index_tensors(
@@ -617,6 +690,8 @@ def prepare_context_parallel_metadata(
     cp_rank,
     cp_size,
     seqs_len,
+    req_pool_indices=None,
+    device=None,
 ):
     """Prepare CP metadata based on current prefill CP mode.
 
@@ -630,6 +705,8 @@ def prepare_context_parallel_metadata(
             _cp_rank=cp_rank,
             _cp_size=cp_size,
             _seqs_len=seqs_len,
+            req_pool_indices=req_pool_indices,
+            device=device,
         )
 
     """prepare_input_dp_with_cp_dsa-zigzag index（in-seq-split）
@@ -824,10 +901,34 @@ def cp_round_robin_split_q_seqs_cpu(extend_seqs_cpu: List[int]) -> Tuple[List[in
     return q_seqs, bs_idx
 
 
-def prepare_round_robin_context_parallel_metadata(kv_len, _cp_rank, _cp_size, _seqs_len):
+def prepare_round_robin_context_parallel_metadata(
+    kv_len,
+    _cp_rank,
+    _cp_size,
+    _seqs_len,
+    req_pool_indices=None,
+    device=None,
+):
     """
     Round-robin mode does not need zigzag metadata. We still return a metadata object
     so callers can use a unified `attn_cp_metadata is not None` contract.
     """
-    _ = (_cp_rank, _cp_size, _seqs_len)
-    return ContextParallelMetadata(total_seq_lens=torch.tensor(kv_len))
+    prefix_len = 0
+    if _seqs_len is not None and len(_seqs_len) == 1:
+        prefix_len = max(0, int(_seqs_len[0]) - int(kv_len))
+    device = _get_cp_metadata_device(device)
+    rr_plan = build_round_robin_prefill_plan(
+        extend_len=int(kv_len),
+        prefix_len=prefix_len,
+        cp_rank=int(_cp_rank),
+        cp_size=int(_cp_size),
+        req_pool_indices=req_pool_indices,
+        device=device,
+    )
+    return ContextParallelMetadata(
+        total_seq_lens=torch.tensor(kv_len, device=device, dtype=torch.int32),
+        rr_qo_indptr_tensor=rr_plan["rr_qo_indptr_tensor"],
+        rr_seq_lens_tensor=rr_plan["rr_seq_lens_tensor"],
+        rr_prefix_lens_tensor=rr_plan["rr_prefix_lens_tensor"],
+        rr_req_pool_indices_tensor=rr_plan["rr_req_pool_indices_tensor"],
+    )
