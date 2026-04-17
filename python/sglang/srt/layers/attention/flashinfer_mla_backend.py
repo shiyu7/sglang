@@ -730,6 +730,26 @@ class FlashInferMLAAttnBackend(AttentionBackend):
             k_buf = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).to(
                 q.dtype
             )
+            def _plan_cp_paged_prefill(q_len: int, kv_len: int, device: torch.device):
+                assert q_len > 0
+                assert kv_len >= q_len
+                seq_lens = torch.tensor([kv_len], device=device, dtype=torch.int32)
+                prefix_lens = torch.tensor(
+                    [kv_len - q_len], device=device, dtype=torch.int32
+                )
+                self.indices_updater_prefill.call_begin_forward(
+                    self.prefill_wrapper_ragged,
+                    self._prefill_wrapper_paged_cp,
+                    forward_batch.req_pool_indices[:1],
+                    seq_lens,
+                    kv_len,
+                    seq_lens,
+                    prefix_lens,
+                    self.indices_updater_prefill.kv_indptr,
+                    self.indices_updater_prefill.qo_indptr,
+                    use_ragged=False,
+                    spec_info=None,
+                )
             if q_rope is None:
                 qall = q.view(-1, layer.tp_q_head_num, layer.head_dim)
                 q, q_rope = (
@@ -753,28 +773,8 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                     q_chunk, _cu_seqlens_q_cp, cache_seqlens_cp, _max_seqlen_q_cp
                 ):
                     kv_len = int(cache_seqlens_cp[0].item())
-                    qo_indptr = torch.tensor(
-                        [0, q_chunk.shape[0]],
-                        device=q_chunk.device,
-                        dtype=torch.int32,
-                    )
-                    kv_indptr = torch.tensor(
-                        [0, kv_len], device=q_chunk.device, dtype=torch.int32
-                    )
-                    paged_kernel_lens = torch.tensor(
-                        [kv_len], device=q_chunk.device, dtype=torch.int32
-                    )
-                    # Plan a temporary wrapper for this (q_chunk, kv_len) pair.
-                    self.indices_updater_decode.call_begin_forward(
-                        self._prefill_wrapper_paged_cp,
-                        forward_batch.req_pool_indices[:1],
-                        paged_kernel_lens,
-                        kv_len,
-                        qo_indptr,
-                        kv_indptr,
-                        init_metadata_replay=False,
-                        spec_info=None,
-                    )
+                    # Re-plan using prefill semantics for the local CP chunk.
+                    _plan_cp_paged_prefill(q_chunk.shape[0], kv_len, q_chunk.device)
                     q_nope = q_chunk[:, :, : layer.v_head_dim]
                     q_rope = q_chunk[:, :, layer.v_head_dim :]
                     o_chunk = q_nope.new_empty(q_nope.shape)
@@ -941,25 +941,7 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                         except Exception:
                             pass
                         # #endregion
-                    qo_indptr = torch.tensor(
-                        [0, 1], device=q.device, dtype=torch.int32
-                    )
-                    kv_indptr = torch.tensor(
-                        [0, kv_len], device=q.device, dtype=torch.int32
-                    )
-                    paged_kernel_lens = torch.tensor(
-                        [kv_len], device=q.device, dtype=torch.int32
-                    )
-                    self.indices_updater_decode.call_begin_forward(
-                        self._prefill_wrapper_paged_cp,
-                        forward_batch.req_pool_indices[:1],
-                        paged_kernel_lens,
-                        kv_len,
-                        qo_indptr,
-                        kv_indptr,
-                        init_metadata_replay=False,
-                        spec_info=None,
-                    )
+                    _plan_cp_paged_prefill(1, kv_len, q.device)
                     q_nope = q[token_idx : token_idx + 1]
                     q_rope_i = q_rope[token_idx : token_idx + 1]
                     o_token = q_nope.new_empty(q_nope.shape)
