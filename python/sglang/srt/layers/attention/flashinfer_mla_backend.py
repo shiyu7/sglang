@@ -560,6 +560,56 @@ class FlashInferMLAAttnBackend(AttentionBackend):
         # Save kv cache
         if save_kv_cache and k is not None:
             assert v is not None
+            # #region debug-point H:mla-save-kv
+            try:
+                import json, os, time, urllib.request
+
+                _evt = {
+                    "sessionId": "cp-accuracy-drop",
+                    "runId": "pre-fix",
+                    "hypothesisId": "H",
+                    "traceId": str(id(forward_batch)),
+                    "location": "flashinfer_mla_backend.forward_extend:save-kv",
+                    "msg": "[DEBUG] MLA KV save invoked",
+                    "data": {
+                        "save_kv_cache": bool(save_kv_cache),
+                        "k_len": int(k.shape[0]),
+                        "v_len": int(v.shape[0]),
+                        "out_cache_loc_len": None
+                        if cache_loc is None
+                        else int(cache_loc.shape[0]),
+                        "use_prefill_cp": bool(use_prefill_cp),
+                        "is_rr": bool(is_prefill_cp_round_robin_split()),
+                        "batch_size": getattr(forward_batch, "batch_size", None),
+                    },
+                    "ts": time.time_ns() // 1000000,
+                }
+                _u = "http://127.0.0.1:7777/event"
+                try:
+                    with open(".dbg/cp-accuracy-drop.env") as _f:
+                        _env = _f.read().splitlines()
+                    _u = next(
+                        (l.split("=", 1)[1] for l in _env if l.startswith("DEBUG_SERVER_URL=")),
+                        _u,
+                    )
+                except Exception:
+                    pass
+                try:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            _u,
+                            data=json.dumps(_evt).encode(),
+                            headers={"Content-Type": "application/json"},
+                        ),
+                        timeout=0.2,
+                    ).read()
+                except Exception:
+                    os.makedirs(".dbg", exist_ok=True)
+                    with open(".dbg/trae-debug-log-cp-accuracy-drop.ndjson", "a") as _f:
+                        _f.write(json.dumps(_evt) + "\n")
+            except Exception:
+                pass
+            # #endregion
             if k_rope is not None:
                 forward_batch.token_to_kv_pool.set_mla_kv_buffer(
                     layer, cache_loc, k, k_rope

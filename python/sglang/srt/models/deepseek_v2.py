@@ -1549,6 +1549,9 @@ class DeepseekV2AttentionMLA(
                 "data": {
                     "local_latent_len": int(latent_cache.shape[0]),
                     "full_latent_len": int(latent_cache_output.shape[0]),
+                    "out_cache_loc_len": None
+                    if getattr(forward_batch, "out_cache_loc", None) is None
+                    else int(forward_batch.out_cache_loc.shape[0]),
                     "cp_size": int(cp_size),
                     "cp_rank": int(get_attention_cp_rank()),
                     "cp_group_ranks": list(getattr(_g, "ranks", [])),

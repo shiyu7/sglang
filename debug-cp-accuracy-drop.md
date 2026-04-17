@@ -27,3 +27,21 @@
 
 ## Next Step
 - Add instrumentation only. No business-logic fix before evidence is collected.
+
+## Evidence Collected
+- `Hypothesis 1` rejected for the captured failing cases:
+  - Round-robin MLA branch entered with `batch_size=1`, `cp_rank=0..7`, same `req_pool_indices`.
+- `Hypothesis 2` largely rejected:
+  - `kv_len` follows `prefix_len + global_token_idx + 1` and is self-consistent across all CP ranks.
+- `Hypothesis 3` rejected for the captured case:
+  - `cp_group_ranks=[0,1,2,3,4,5,6,7]`, matching a node-local TP/CP group.
+- `Hypothesis 4` narrowed:
+  - MLA KV rebuild and final hidden-state gather both show `local_len * cp_size == full_len` (e.g. `17 -> 136`), so group topology and gather lengths look correct.
+
+## Current Leading Hypothesis
+1. CP gather lengths are correct, but the rebuilt full MLA KV may be written back with a local-length `out_cache_loc`, silently truncating the effective KV state stored in the paged pool.
+2. If the write-back location length is correct, then the remaining highest-probability root cause is the round-robin per-token paged MLA special path itself (`call_begin_forward(... req_to_token ...)`) producing semantically wrong paged indices despite correct `kv_len`.
+
+## Next Evidence To Collect
+- Compare `len(forward_batch.out_cache_loc)` against `local_latent_len/full_latent_len` at MLA KV rebuild/save time.
+- If `out_cache_loc` already has full length, log a small suffix of generated `kv_indices` for one round-robin token to verify that paged indices match the expected global token order.
