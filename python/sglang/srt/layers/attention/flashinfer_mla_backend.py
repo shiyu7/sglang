@@ -758,9 +758,16 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                     prefix_len = int(forward_batch.extend_prefix_lens_cpu[0])
 
                 cp_rank = get_attention_cp_rank()
+                # #region debug-point B:rr-mla-branch
+                import json, urllib.request; _p='.dbg/cp-accuracy-drop.env'; _u,_s='http://127.0.0.1:7777/event','cp-accuracy-drop'; exec("try:\n with open(_p) as f: c=f.read(); _u=next((l.split('=',1)[1] for l in c.split('\\n') if l.startswith('DEBUG_SERVER_URL=')),_u); _s=next((l.split('=',1)[1] for l in c.split('\\n') if l.startswith('DEBUG_SESSION_ID=')),_s)\nexcept: pass"); exec("try:\n urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId':_s,'runId':'pre-fix','hypothesisId':'B','traceId':str(id(forward_batch)),'location':'flashinfer_mla_backend.forward_extend:rr-enter','msg':'[DEBUG] entered MLA round-robin paged prefill branch','data':{'batch_size':getattr(forward_batch,'batch_size',None),'cp_rank':int(cp_rank),'cp_size':int(cp_size),'local_q_len':int(q.shape[0]),'k_buf_len':int(k_buf.shape[0]),'prefix_len':int(prefix_len),'req_pool_indices':forward_batch.req_pool_indices[:1].tolist() if getattr(forward_batch,'req_pool_indices',None) is not None else None},'ts':__import__('time').time_ns()//1000000}).encode(), headers={'Content-Type':'application/json'}), timeout=0.2).read()\nexcept: pass")
+                # #endregion
                 outputs = []
                 for token_idx in range(q.shape[0]):
                     kv_len = prefix_len + cp_rank + token_idx * cp_size + 1
+                    if token_idx < 2 or token_idx == q.shape[0] - 1:
+                        # #region debug-point D:rr-mla-kvlen
+                        import json, urllib.request; _p='.dbg/cp-accuracy-drop.env'; _u,_s='http://127.0.0.1:7777/event','cp-accuracy-drop'; exec("try:\n with open(_p) as f: c=f.read(); _u=next((l.split('=',1)[1] for l in c.split('\\n') if l.startswith('DEBUG_SERVER_URL=')),_u); _s=next((l.split('=',1)[1] for l in c.split('\\n') if l.startswith('DEBUG_SESSION_ID=')),_s)\nexcept: pass"); exec("try:\n urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId':_s,'runId':'pre-fix','hypothesisId':'D','traceId':str(id(forward_batch)),'location':'flashinfer_mla_backend.forward_extend:rr-token','msg':'[DEBUG] MLA round-robin token kv_len computed','data':{'token_idx':int(token_idx),'global_token_idx':int(cp_rank + token_idx * cp_size),'kv_len':int(kv_len),'prefix_len':int(prefix_len),'cp_rank':int(cp_rank),'cp_size':int(cp_size),'local_q_len':int(q.shape[0]),'k_buf_len':int(k_buf.shape[0])},'ts':__import__('time').time_ns()//1000000}).encode(), headers={'Content-Type':'application/json'}), timeout=0.2).read()\nexcept: pass")
+                        # #endregion
                     qo_indptr = torch.tensor(
                         [0, 1], device=q.device, dtype=torch.int32
                     )

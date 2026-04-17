@@ -182,7 +182,11 @@ def is_prefill_cp(forward_batch) -> bool:
 def can_cp_split(seq_len: int, cp_size: int, forward_batch):
     # Round-robin mode feasibility is determined by per-seq lengths and CP size.
     # Keep `seq_len` for API compatibility; the decision mainly relies on batch metadata.
-    if not _prefill_cp_is_single_seq_batch(forward_batch):
+    _single_seq_ok = _prefill_cp_is_single_seq_batch(forward_batch)
+    # #region debug-point A:cp-can-split
+    import json, urllib.request; _p='.dbg/cp-accuracy-drop.env'; _u,_s='http://127.0.0.1:7777/event','cp-accuracy-drop'; exec("try:\n with open(_p) as f: c=f.read(); _u=next((l.split('=',1)[1] for l in c.split('\\n') if l.startswith('DEBUG_SERVER_URL=')),_u); _s=next((l.split('=',1)[1] for l in c.split('\\n') if l.startswith('DEBUG_SESSION_ID=')),_s)\nexcept: pass"); exec("try:\n urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId':_s,'runId':'pre-fix','hypothesisId':'A','traceId':str(id(forward_batch)),'location':'cp_utils.can_cp_split','msg':'[DEBUG] cp split gating evaluated','data':{'seq_len':int(seq_len),'cp_size':int(cp_size),'batch_size':getattr(forward_batch,'batch_size',None),'seq_lens_cpu':None if getattr(forward_batch,'seq_lens_cpu',None) is None else forward_batch.seq_lens_cpu.tolist(),'extend_seq_lens_cpu':getattr(forward_batch,'extend_seq_lens_cpu',None),'single_seq_ok':bool(_single_seq_ok),'is_rr':bool(is_prefill_cp_round_robin_split()),'is_extend_cp':bool(forward_batch.forward_mode.is_context_parallel_extend()),'cp_enabled':bool(is_prefill_context_parallel_enabled())},'ts':__import__('time').time_ns()//1000000}).encode(), headers={'Content-Type':'application/json'}), timeout=0.2).read()\nexcept: pass")
+    # #endregion
+    if not _single_seq_ok:
         return False
     if is_prefill_cp_round_robin_split():
         return can_prefill_cp_round_robin_split(forward_batch)
