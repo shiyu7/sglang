@@ -80,8 +80,10 @@ class TestDeepseekV2CPMetadata(CustomTestCase):
         )
 
         self.assertEqual(req_pool_indices.tolist(), [23, 23, 23])
-        self.assertEqual(seq_lens.tolist(), [65, 69, 73])
-        self.assertEqual(prefix_lens.tolist(), [64, 68, 72])
+        # seq_lens = prefix_len + global_token_idx + 1, where prefix_len = seqs_len - kv_len
+        # seqs_len=74, kv_len=10 => prefix_len=64; global_token_idx=[1,5,9]
+        self.assertEqual(seq_lens.tolist(), [66, 70, 74])
+        self.assertEqual(prefix_lens.tolist(), [65, 69, 73])
         self.assertEqual(qo_indptr.tolist(), [0, 1, 2, 3])
 
 
