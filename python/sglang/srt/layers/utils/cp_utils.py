@@ -365,6 +365,53 @@ def cp_all_gather_rerange_output(input_tensor, cp_size, forward_batch, stream):
         get_attention_cp_group().cp_all_gather_into_tensor_async(output_tensor, input_tensor, stream)
         out_shape = output_tensor.shape
         output_tensor = output_tensor.view(cp_size, -1, *out_shape[1:]).transpose(0, 1).reshape(out_shape)
+        # #region debug-point E:rr-output-gather
+        try:
+            import json, os, time, urllib.request
+
+            _g = get_attention_cp_group()
+            _evt = {
+                "sessionId": "cp-accuracy-drop",
+                "runId": "pre-fix",
+                "hypothesisId": "E",
+                "traceId": str(id(forward_batch)),
+                "location": "cp_utils.cp_all_gather_rerange_output",
+                "msg": "[DEBUG] rr output gather completed",
+                "data": {
+                    "input_len": int(input_tensor.shape[0]),
+                    "output_len": int(output_tensor.shape[0]),
+                    "cp_size": int(cp_size),
+                    "cp_rank": int(get_attention_cp_rank()),
+                    "cp_group_ranks": list(getattr(_g, "ranks", [])),
+                },
+                "ts": time.time_ns() // 1000000,
+            }
+            _u = "http://127.0.0.1:7777/event"
+            try:
+                with open(".dbg/cp-accuracy-drop.env") as _f:
+                    _env = _f.read().splitlines()
+                _u = next(
+                    (l.split("=", 1)[1] for l in _env if l.startswith("DEBUG_SERVER_URL=")),
+                    _u,
+                )
+            except Exception:
+                pass
+            try:
+                urllib.request.urlopen(
+                    urllib.request.Request(
+                        _u,
+                        data=json.dumps(_evt).encode(),
+                        headers={"Content-Type": "application/json"},
+                    ),
+                    timeout=0.2,
+                ).read()
+            except Exception:
+                os.makedirs(".dbg", exist_ok=True)
+                with open(".dbg/trae-debug-log-cp-accuracy-drop.ndjson", "a") as _f:
+                    _f.write(json.dumps(_evt) + "\n")
+        except Exception:
+            pass
+        # #endregion
         return output_tensor
     # in-seq-split path (zigzag)
     metadata = get_context_parallel_metadata(forward_batch)
@@ -405,9 +452,57 @@ def cp_all_gather_rerange_kv_cache(input_tensor, cp_size, forward_batch, stream)
             output_tensor, input_tensor, stream
         )
         out_shape = output_tensor.shape
-        return output_tensor.view(cp_size, -1, *out_shape[1:]).transpose(0, 1).reshape(
+        output_tensor = output_tensor.view(cp_size, -1, *out_shape[1:]).transpose(0, 1).reshape(
             out_shape
         )
+        # #region debug-point F:rr-kv-gather
+        try:
+            import json, os, time, urllib.request
+
+            _g = get_attention_cp_group()
+            _evt = {
+                "sessionId": "cp-accuracy-drop",
+                "runId": "pre-fix",
+                "hypothesisId": "F",
+                "traceId": str(id(forward_batch)),
+                "location": "cp_utils.cp_all_gather_rerange_kv_cache",
+                "msg": "[DEBUG] rr kv gather completed",
+                "data": {
+                    "input_len": int(input_tensor.shape[0]),
+                    "output_len": int(output_tensor.shape[0]),
+                    "cp_size": int(cp_size),
+                    "cp_rank": int(get_attention_cp_rank()),
+                    "cp_group_ranks": list(getattr(_g, "ranks", [])),
+                },
+                "ts": time.time_ns() // 1000000,
+            }
+            _u = "http://127.0.0.1:7777/event"
+            try:
+                with open(".dbg/cp-accuracy-drop.env") as _f:
+                    _env = _f.read().splitlines()
+                _u = next(
+                    (l.split("=", 1)[1] for l in _env if l.startswith("DEBUG_SERVER_URL=")),
+                    _u,
+                )
+            except Exception:
+                pass
+            try:
+                urllib.request.urlopen(
+                    urllib.request.Request(
+                        _u,
+                        data=json.dumps(_evt).encode(),
+                        headers={"Content-Type": "application/json"},
+                    ),
+                    timeout=0.2,
+                ).read()
+            except Exception:
+                os.makedirs(".dbg", exist_ok=True)
+                with open(".dbg/trae-debug-log-cp-accuracy-drop.ndjson", "a") as _f:
+                    _f.write(json.dumps(_evt) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        return output_tensor
     metadata = get_context_parallel_metadata(forward_batch)
     output_tensor = cp_all_gather_reorganized_into_tensor_kv_cache(
         input_tensor,

@@ -1533,6 +1533,54 @@ class DeepseekV2AttentionMLA(
             forward_batch,
             torch.cuda.current_stream(),
         )
+        # #region debug-point G:mla-kv-rebuild
+        try:
+            import json, os, time, urllib.request
+            from sglang.srt.layers.dp_attention import get_attention_cp_group, get_attention_cp_rank
+
+            _g = get_attention_cp_group()
+            _evt = {
+                "sessionId": "cp-accuracy-drop",
+                "runId": "pre-fix",
+                "hypothesisId": "G",
+                "traceId": str(id(forward_batch)),
+                "location": "deepseek_v2.rebuild_cp_kv_cache",
+                "msg": "[DEBUG] MLA KV rebuild completed",
+                "data": {
+                    "local_latent_len": int(latent_cache.shape[0]),
+                    "full_latent_len": int(latent_cache_output.shape[0]),
+                    "cp_size": int(cp_size),
+                    "cp_rank": int(get_attention_cp_rank()),
+                    "cp_group_ranks": list(getattr(_g, "ranks", [])),
+                },
+                "ts": time.time_ns() // 1000000,
+            }
+            _u = "http://127.0.0.1:7777/event"
+            try:
+                with open(".dbg/cp-accuracy-drop.env") as _f:
+                    _env = _f.read().splitlines()
+                _u = next(
+                    (l.split("=", 1)[1] for l in _env if l.startswith("DEBUG_SERVER_URL=")),
+                    _u,
+                )
+            except Exception:
+                pass
+            try:
+                urllib.request.urlopen(
+                    urllib.request.Request(
+                        _u,
+                        data=json.dumps(_evt).encode(),
+                        headers={"Content-Type": "application/json"},
+                    ),
+                    timeout=0.2,
+                ).read()
+            except Exception:
+                os.makedirs(".dbg", exist_ok=True)
+                with open(".dbg/trae-debug-log-cp-accuracy-drop.ndjson", "a") as _f:
+                    _f.write(json.dumps(_evt) + "\n")
+        except Exception:
+            pass
+        # #endregion
         k_nope = latent_cache_output[..., : self.kv_lora_rank].unsqueeze(1)
         k_pe = latent_cache_output[..., self.kv_lora_rank :].unsqueeze(1)
         return k_nope, k_pe
