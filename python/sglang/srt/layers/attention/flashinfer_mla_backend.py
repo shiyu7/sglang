@@ -1129,6 +1129,58 @@ class FlashInferMLAIndicesUpdaterDecode:
                 kv_indices,
                 self.req_to_token.shape[1],
             )
+            if is_prefill_cp_round_robin_split() and bs == 1 and int(q_indptr[-1].item()) == 1:
+                # #region debug-point I:rr-kv-indices
+                try:
+                    import json, os, time, urllib.request
+
+                    _req_idx = int(req_pool_indices[0].item())
+                    _kv_len = int(paged_kernel_lens_sum)
+                    _row = self.req_to_token[_req_idx, :_kv_len]
+                    _evt = {
+                        "sessionId": "cp-accuracy-drop",
+                        "runId": "pre-fix",
+                        "hypothesisId": "I",
+                        "location": "flashinfer_mla_backend.call_begin_forward",
+                        "msg": "[DEBUG] rr kv indices materialized",
+                        "data": {
+                            "req_pool_idx": _req_idx,
+                            "kv_len": _kv_len,
+                            "q_len": int(q_indptr[-1].item()),
+                            "cp_rank": int(get_attention_cp_rank()),
+                            "req_to_token_head": _row[: min(8, _row.shape[0])].tolist(),
+                            "req_to_token_tail": _row[max(0, _row.shape[0] - 8) :].tolist(),
+                            "kv_indices_head": kv_indices[: min(8, kv_indices.shape[0])].tolist(),
+                            "kv_indices_tail": kv_indices[max(0, kv_indices.shape[0] - 8) :].tolist(),
+                        },
+                        "ts": time.time_ns() // 1000000,
+                    }
+                    _u = "http://127.0.0.1:7777/event"
+                    try:
+                        with open(".dbg/cp-accuracy-drop.env") as _f:
+                            _env = _f.read().splitlines()
+                        _u = next(
+                            (l.split("=", 1)[1] for l in _env if l.startswith("DEBUG_SERVER_URL=")),
+                            _u,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        urllib.request.urlopen(
+                            urllib.request.Request(
+                                _u,
+                                data=json.dumps(_evt).encode(),
+                                headers={"Content-Type": "application/json"},
+                            ),
+                            timeout=0.2,
+                        ).read()
+                    except Exception:
+                        os.makedirs(".dbg", exist_ok=True)
+                        with open(".dbg/trae-debug-log-cp-accuracy-drop.ndjson", "a") as _f:
+                            _f.write(json.dumps(_evt) + "\n")
+                except Exception:
+                    pass
+                # #endregion
         else:
             kv_indptr, kv_indices = spec_info.kv_indptr, spec_info.kv_indices
 
