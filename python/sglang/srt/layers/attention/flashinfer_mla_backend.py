@@ -25,6 +25,7 @@ from sglang.srt.layers.attention.flashinfer_backend import (
 )
 from sglang.srt.layers.dp_attention import get_attention_cp_rank, get_attention_tp_size
 from sglang.srt.layers.utils.cp_utils import (
+    cp_all_gather_rerange_output,
     cp_attn_forward_extend,
     cp_use_prefill,
     get_round_robin_paged_prefill_plan,
@@ -971,6 +972,93 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                         k_rope_buf,
                         out=o,
                     )
+                    # #region debug-point J:rr-vs-global-paged-ref
+                    try:
+                        import json, os, time, urllib.request
+
+                        q_full = cp_all_gather_rerange_output(
+                            q, cp_size, forward_batch, torch.cuda.current_stream()
+                        )
+                        q_rope_full = cp_all_gather_rerange_output(
+                            q_rope,
+                            cp_size,
+                            forward_batch,
+                            torch.cuda.current_stream(),
+                        )
+                        o_ref_full = q_full.new_empty(q_full.shape)
+                        o_ref_full = prefill_wrapper_paged.run(
+                            q_full,
+                            q_rope_full,
+                            k_nope_buf,
+                            k_rope_buf,
+                            out=o_ref_full,
+                        )
+                        global_token_idx = cp_rank + torch.arange(
+                            q.shape[0], device=q.device, dtype=torch.int64
+                        ) * cp_size
+                        o_ref_local = o_ref_full[global_token_idx]
+                        diff = (o_ref_local - o).float().abs()
+                        _evt = {
+                            "sessionId": "cp-accuracy-drop",
+                            "runId": "pre-fix",
+                            "hypothesisId": "J",
+                            "traceId": str(id(forward_batch)),
+                            "location": "flashinfer_mla_backend.forward_extend:rr-compare-global-paged",
+                            "msg": "[DEBUG] rr local paged MLA output compared against global paged reference",
+                            "data": {
+                                "cp_rank": int(cp_rank),
+                                "cp_size": int(cp_size),
+                                "local_q_len": int(q.shape[0]),
+                                "global_q_len": int(q_full.shape[0]),
+                                "max_abs_diff": float(diff.max().item()) if diff.numel() > 0 else 0.0,
+                                "mean_abs_diff": float(diff.mean().item()) if diff.numel() > 0 else 0.0,
+                                "sample_global_token_idx": global_token_idx[
+                                    : min(4, global_token_idx.shape[0])
+                                ].tolist(),
+                            },
+                            "ts": time.time_ns() // 1000000,
+                        }
+                        _u = "http://127.0.0.1:7777/event"
+                        _env_path = ".dbg/cp-accuracy-drop.env"
+                        try:
+                            with open(_env_path) as _f:
+                                _env = _f.read().splitlines()
+                            _u = next(
+                                (
+                                    l.split("=", 1)[1]
+                                    for l in _env
+                                    if l.startswith("DEBUG_SERVER_URL=")
+                                ),
+                                _u,
+                            )
+                            _evt["sessionId"] = next(
+                                (
+                                    l.split("=", 1)[1]
+                                    for l in _env
+                                    if l.startswith("DEBUG_SESSION_ID=")
+                                ),
+                                _evt["sessionId"],
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            urllib.request.urlopen(
+                                urllib.request.Request(
+                                    _u,
+                                    data=json.dumps(_evt).encode(),
+                                    headers={"Content-Type": "application/json"},
+                                ),
+                                timeout=0.2,
+                            ).read()
+                        except Exception:
+                            os.makedirs(".dbg", exist_ok=True)
+                            with open(
+                                ".dbg/trae-debug-log-cp-accuracy-drop.ndjson", "a"
+                            ) as _f:
+                                _f.write(json.dumps(_evt) + "\n")
+                    except Exception:
+                        pass
+                    # #endregion
                 else:
                     o = q.new_empty(q.shape)
             else:
