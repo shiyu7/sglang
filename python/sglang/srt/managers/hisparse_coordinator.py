@@ -1,5 +1,6 @@
 # to be combined with the sparse coordinator class and sparse algorithm family
 
+import os
 import logging
 from typing import List, NamedTuple
 
@@ -128,6 +129,46 @@ class HiSparseCoordinator:
         # CPU flag: True means "skip backup on the next decode step" because
         # staging already backed up all prefill tokens.  Cleared after one step.
         self._skip_first_backup = [False] * max_num_reqs
+        self.debug_print_enabled = (
+            os.environ.get("SGLANG_DEBUG_HISPARSE_LEAK", "0") == "1"
+        )
+
+    def _allocator_snapshot(self) -> str:
+        allocator = self.token_to_kv_pool_allocator
+        logical_available = allocator.logical_attn_allocator.available_size()
+        hisparse_available = allocator.hisparse_attn_allocator.available_size()
+        overall_available = allocator.available_size()
+        return (
+            f"logical_available={logical_available} "
+            f"hisparse_available={hisparse_available} "
+            f"overall_available={overall_available}"
+        )
+
+    def _debug_print(self, tag: str, req: Req | None = None, **kwargs) -> None:
+        if not self.debug_print_enabled:
+            return
+        parts = [f"[HiSparseDebug] {tag}"]
+        if req is not None:
+            current_cap = (
+                int(self.req_device_buffer_size[req.req_pool_idx])
+                if req.req_pool_idx is not None and req.req_pool_idx >= 0
+                else -1
+            )
+            parts.append(
+                " ".join(
+                    [
+                        f"rid={req.rid}",
+                        f"req_pool_idx={req.req_pool_idx}",
+                        f"kv_allocated_len={req.kv_allocated_len}",
+                        f"kv_committed_len={req.kv_committed_len}",
+                        f"current_cap={current_cap}",
+                    ]
+                )
+            )
+        if kwargs:
+            parts.append(" ".join(f"{k}={v}" for k, v in kwargs.items()))
+        parts.append(self._allocator_snapshot())
+        print(" ".join(parts), flush=True)
 
     def set_decode_producer_stream(self, stream) -> None:
         self.decode_producer_stream = stream
@@ -201,6 +242,7 @@ class HiSparseCoordinator:
           buffer.  In the staging path this is correct (prefill filled the buffer),
           but here the buffer is empty.
         """
+        self._debug_print("admit_request_direct.begin", req)
         self.alloc_device_buffer(req)
 
         if req.kv_allocated_len <= self.device_buffer_size:
@@ -219,6 +261,7 @@ class HiSparseCoordinator:
         req.staging = False
         self._skip_first_backup[req.req_pool_idx] = True
         logger.debug("HiSparse: admitting request %s directly", req.rid)
+        self._debug_print("admit_request_direct.end", req)
 
     def _preload_to_device_buffer(self, req: Req) -> None:
         """Preload all tokens from host pool into the device buffer."""
@@ -236,6 +279,7 @@ class HiSparseCoordinator:
             )
 
     def alloc_device_buffer(self, req: Req) -> None:
+        self._debug_print("alloc_device_buffer.begin", req)
         allocated_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : req.kv_allocated_len
         ]
@@ -270,6 +314,12 @@ class HiSparseCoordinator:
         ] = torch.arange(self.device_buffer_size, device=self.device)
         self.req_device_buffer_token_locs[:, req.req_pool_idx, :alloc_size] = (
             buffer_indices[:alloc_size]
+        )
+        self._debug_print(
+            "alloc_device_buffer.end",
+            req,
+            alloc_size=alloc_size,
+            allocated_indices_numel=int(allocated_indices.numel()),
         )
 
     def has_ongoing_staging(self) -> bool:
@@ -347,6 +397,14 @@ class HiSparseCoordinator:
                 total_grow += grow_size
 
             if total_grow > 0:
+                if self.debug_print_enabled:
+                    print(
+                        "[HiSparseDebug] grow_device_buffers.plan "
+                        f"req_idxs={req_idxs} old_caps={old_caps} "
+                        f"new_caps={new_caps} grow_sizes={grow_sizes} "
+                        f"total_grow={total_grow} {self._allocator_snapshot()}",
+                        flush=True,
+                    )
                 all_new_indices = (
                     self.token_to_kv_pool_allocator.hisparse_attn_allocator.alloc(
                         total_grow
@@ -373,6 +431,14 @@ class HiSparseCoordinator:
                         :, req_idx, current_cap:new_cap
                     ] = chunk
                     self.req_device_buffer_size[req_idx] = new_cap
+                    if self.debug_print_enabled:
+                        print(
+                            "[HiSparseDebug] grow_device_buffers.apply "
+                            f"req_pool_idx={req_idx} old_cap={current_cap} "
+                            f"new_cap={new_cap} grow_size={grow_size} "
+                            f"{self._allocator_snapshot()}",
+                            flush=True,
+                        )
 
         reserved_positions = (seq_lens - 1).clamp(max=self.device_buffer_size)
         return self.req_to_device_buffer[req_pool_indices, reserved_positions]
@@ -591,6 +657,7 @@ class HiSparseCoordinator:
         Must be called when aborting a request that has been admitted into staging
         but has not yet completed (i.e. req.hisparse_staging is True).
         """
+        self._debug_print("abort_staging_request.begin", req)
         # Remove from staging queue
         self.ack_staging_queue = [
             act for act in self.ack_staging_queue if act.req is not req
@@ -606,14 +673,17 @@ class HiSparseCoordinator:
         self.req_to_host_pool[req.req_pool_idx, :] = -1
         self._skip_first_backup[req.req_pool_idx] = False
         req.hisparse_staging = False
+        self._debug_print("abort_staging_request.end", req)
 
     def retract_req(self, req: Req) -> None:
+        self._debug_print("retract_req", req, hisparse_staging=req.hisparse_staging)
         if req.hisparse_staging:
             self.abort_staging_request(req)
         else:
             self.request_finished(req)
 
     def request_finished(self, req: Req):
+        self._debug_print("request_finished.begin", req)
         # release resources only after the execution of a potential overlapped batch
         if self.decode_producer_stream is not None:
             device_module.current_stream().wait_stream(self.decode_producer_stream)
@@ -645,6 +715,7 @@ class HiSparseCoordinator:
         self.req_to_host_pool[req.req_pool_idx, :] = -1
         self.lru_slots[:, req.req_pool_idx, :].copy_(self._lru_init)
         self._skip_first_backup[req.req_pool_idx] = False
+        self._debug_print("request_finished.end", req)
 
     def swap_in_selected_pages(
         self,
