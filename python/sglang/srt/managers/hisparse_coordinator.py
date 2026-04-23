@@ -501,11 +501,38 @@ class HiSparseCoordinator:
             seq_lens, req_pool_indices, seq_lens_cpu, req_pool_indices_cpu
         )
 
+        prev_token_pos = seq_lens - 2
+        valid_prev_mask = prev_token_pos >= 0
+        if torch.any(valid_prev_mask):
+            prev_req_pool_indices = req_pool_indices[valid_prev_mask]
+            prev_token_pos = prev_token_pos[valid_prev_mask]
+            prev_cache_loc = self.req_to_token_pool.req_to_token[
+                prev_req_pool_indices, prev_token_pos
+            ]
+            if self.debug_print_enabled:
+                prev_mapping = self.mem_pool_device.full_to_hisparse_device_index_mapping[
+                    prev_cache_loc
+                ]
+                for req_idx, token_pos, cache_loc, old_mapping in zip(
+                    prev_req_pool_indices.tolist(),
+                    prev_token_pos.tolist(),
+                    prev_cache_loc.tolist(),
+                    prev_mapping.tolist(),
+                ):
+                    if old_mapping > 0:
+                        print(
+                            f"[HiSparseDebug] map_last_loc_to_buffer.clear_prior "
+                            f"req_pool_idx={req_idx} token_pos={token_pos} "
+                            f"cache_loc={cache_loc} old_mapping={old_mapping} "
+                            f"old_page={old_mapping // self.token_to_kv_pool_allocator.page_size}",
+                            flush=True,
+                        )
+            self.mem_pool_device.full_to_hisparse_device_index_mapping[prev_cache_loc] = 0
+
         self.req_device_buffer_token_locs[
             :, req_pool_indices, self.device_buffer_size
         ] = reserved_buffer_loc.to(torch.int32)
 
-        # todo, clear the prior mapping as well
         if self.debug_print_enabled:
             for req_idx, out_loc, buffer_loc in zip(
                 req_pool_indices.tolist(),
