@@ -214,6 +214,23 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             f"pages={pages_repr}"
         )
 
+    def _debug_log_mapping_write(
+        self,
+        caller: str,
+        logical_indices: torch.Tensor,
+        hisparse_indices: torch.Tensor,
+    ) -> None:
+        if not self._debug_hisparse_leak_enabled():
+            return
+        print(
+            f"[HiSparseDebug] mapping_write "
+            f"caller={caller} "
+            f"logical_indices={logical_indices.tolist()} "
+            f"hisparse_indices={hisparse_indices.tolist()} "
+            f"{self._debug_page_summary(hisparse_indices)}",
+            flush=True,
+        )
+
     def alloc(self, need_size: int):
         raise NotImplementedError(
             "Page size = 1 is not supported in HiSparse allocator"
@@ -370,6 +387,9 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             hisparse_indices is not None
         ), "Hisparse allocation failed in alloc_extend"
 
+        self._debug_log_mapping_write(
+            "allocator.alloc_extend", logical_indices, hisparse_indices
+        )
         self.full_to_hisparse_device_index_mapping[logical_indices] = hisparse_indices
 
         import os as _os
@@ -417,6 +437,9 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         if logical_indices is None or hisparse_indices is None:
             return None
 
+        self._debug_log_mapping_write(
+            "allocator.alloc_decode_debug", logical_indices, hisparse_indices
+        )
         self.full_to_hisparse_device_index_mapping[logical_indices] = hisparse_indices
 
         import os as _os

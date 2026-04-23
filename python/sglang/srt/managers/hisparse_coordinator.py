@@ -542,12 +542,27 @@ class HiSparseCoordinator:
                 print(
                     f"[HiSparseDebug] map_last_loc_to_buffer "
                     f"req_pool_idx={req_idx} out_cache_loc={out_loc} "
-                    f"buffer_loc={buffer_loc} buffer_page={buffer_loc // self.token_to_kv_pool_allocator.page_size}",
+                    f"buffer_loc={buffer_loc} "
+                    f"buffer_page={buffer_loc // self.token_to_kv_pool_allocator.page_size}",
                     flush=True,
                 )
         self.mem_pool_device.full_to_hisparse_device_index_mapping[out_cache_loc] = (
             reserved_buffer_loc
         )
+        if self.debug_print_enabled:
+            for req_idx, out_loc, buffer_loc in zip(
+                req_pool_indices.tolist(),
+                out_cache_loc.tolist(),
+                reserved_buffer_loc.tolist(),
+            ):
+                print(
+                    f"[HiSparseDebug] mapping_write "
+                    f"caller=coordinator.map_last_loc_to_buffer "
+                    f"req_pool_idx={req_idx} logical_index={out_loc} "
+                    f"hisparse_index={buffer_loc} "
+                    f"page={buffer_loc // self.token_to_kv_pool_allocator.page_size}",
+                    flush=True,
+                )
 
     def _eager_backup_previous_token(
         self,
