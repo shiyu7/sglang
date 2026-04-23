@@ -231,6 +231,11 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             flush=True,
         )
 
+    def _filter_owned_hisparse_indices(self, indices: torch.Tensor) -> torch.Tensor:
+        # Page 0 (indices in [1, page_size - 1]) is not allocator-owned.
+        # The paged allocator only allocates pages starting from page index 1.
+        return indices[indices >= self.page_size]
+
     def alloc(self, need_size: int):
         raise NotImplementedError(
             "Page size = 1 is not supported in HiSparse allocator"
@@ -267,7 +272,7 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         # Filter valid (non-zero) hisparse indices.
         # In the direct-to-host path, mapping is all zeros since no hisparse
         # device indices were pre-allocated.
-        hisparse_indices = hisparse_indices[hisparse_indices > 0]
+        hisparse_indices = self._filter_owned_hisparse_indices(hisparse_indices)
         if len(hisparse_indices) >= need_size:
             buffer_indices = hisparse_indices[:need_size]
             self.free_hisparse_indices(
@@ -313,7 +318,7 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             import traceback as _tb
 
             _before = self.hisparse_attn_allocator.available_size()
-            _valid = buffer_indices[buffer_indices > 0]
+            _valid = self._filter_owned_hisparse_indices(buffer_indices)
             _trace = "".join(_tb.format_stack()) if emit_trace else ""
             print(
                 f"[HiSparseDebug] free_hisparse_indices.begin "
@@ -333,7 +338,9 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
                 flush=True,
             )
         else:
-            self.hisparse_attn_allocator.free(buffer_indices[buffer_indices > 0])
+            self.hisparse_attn_allocator.free(
+                self._filter_owned_hisparse_indices(buffer_indices)
+            )
 
     def get_last_loc_hisparse_device(self, last_locs: torch.Tensor):
         hisparse_last_locs = self._kvcache._translate_loc_to_hisparse_device(last_locs)
@@ -467,7 +474,7 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
                 flush=True,
             )
         hisparse_indices = self._kvcache._translate_loc_to_hisparse_device(free_indices)
-        hisparse_indices = hisparse_indices[hisparse_indices > 0]
+        hisparse_indices = self._filter_owned_hisparse_indices(hisparse_indices)
         self.free_hisparse_indices(
             hisparse_indices,
             caller="allocator.free_hisparse",
