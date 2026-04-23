@@ -189,6 +189,31 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             self.hisparse_attn_allocator.available_size(),
         )
 
+    def _debug_hisparse_leak_enabled(self) -> bool:
+        import os as _os
+
+        return _os.environ.get("SGLANG_DEBUG_HISPARSE_LEAK") == "1"
+
+    def _debug_page_summary(self, indices: torch.Tensor) -> str:
+        valid = indices[indices > 0]
+        if valid.numel() == 0:
+            return "valid_numel=0 page_numel=0 pages=[]"
+
+        pages = torch.unique(valid // self.page_size)
+        max_pages_to_show = 32
+        pages_list = pages.tolist()
+        if len(pages_list) > max_pages_to_show:
+            shown_pages = pages_list[:max_pages_to_show]
+            pages_repr = f"{shown_pages}...(total={len(pages_list)})"
+        else:
+            pages_repr = str(pages_list)
+
+        return (
+            f"valid_numel={int(valid.numel())} "
+            f"page_numel={int(pages.numel())} "
+            f"pages={pages_repr}"
+        )
+
     def alloc(self, need_size: int):
         raise NotImplementedError(
             "Page size = 1 is not supported in HiSparse allocator"
@@ -228,7 +253,11 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         hisparse_indices = hisparse_indices[hisparse_indices > 0]
         if len(hisparse_indices) >= need_size:
             buffer_indices = hisparse_indices[:need_size]
-            self.free_hisparse_indices(hisparse_indices[need_size:])
+            self.free_hisparse_indices(
+                hisparse_indices[need_size:],
+                caller="alloc_device_buffer.trim_old_mapping",
+                emit_trace=True,
+            )
         else:
             # page alignment, claiming the residual space for an incomplete page
             page_residual_length = len(hisparse_indices) % self.page_size
@@ -255,23 +284,34 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             buffer_indices = torch.cat([hisparse_indices, extra_indices])
         return buffer_indices
 
-    def free_hisparse_indices(self, buffer_indices: torch.Tensor):
+    def free_hisparse_indices(
+        self,
+        buffer_indices: torch.Tensor,
+        caller: str = "unknown",
+        emit_trace: bool = False,
+    ):
         # disable free group mechanism for device buffer free
         self.hisparse_attn_allocator.is_not_in_free_group = True
-        import os as _os
-        if _os.environ.get("SGLANG_DEBUG_HISPARSE_LEAK") == "1":
+        if self._debug_hisparse_leak_enabled():
+            import traceback as _tb
+
             _before = self.hisparse_attn_allocator.available_size()
             _valid = buffer_indices[buffer_indices > 0]
+            _trace = "".join(_tb.format_stack()) if emit_trace else ""
             print(
                 f"[HiSparseDebug] free_hisparse_indices.begin "
-                f"input_numel={int(buffer_indices.numel())} valid_numel={int(_valid.numel())} "
-                f"hisparse_available_before={_before}",
+                f"caller={caller} "
+                f"input_numel={int(buffer_indices.numel())} "
+                f"{self._debug_page_summary(_valid)} "
+                f"hisparse_available_before={_before}"
+                + (f"\n{_trace}" if _trace else ""),
                 flush=True,
             )
             self.hisparse_attn_allocator.free(_valid)
             _after = self.hisparse_attn_allocator.available_size()
             print(
                 f"[HiSparseDebug] free_hisparse_indices.end "
+                f"caller={caller} "
                 f"hisparse_available_after={_after} delta={_after - _before}",
                 flush=True,
             )
@@ -405,7 +445,11 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             )
         hisparse_indices = self._kvcache._translate_loc_to_hisparse_device(free_indices)
         hisparse_indices = hisparse_indices[hisparse_indices > 0]
-        self.free_hisparse_indices(hisparse_indices)
+        self.free_hisparse_indices(
+            hisparse_indices,
+            caller="allocator.free_hisparse",
+            emit_trace=True,
+        )
         self.full_to_hisparse_device_index_mapping[free_indices] = 0
         if _dbg:
             _after = self.hisparse_attn_allocator.available_size()
