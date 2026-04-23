@@ -699,6 +699,20 @@ class HiSparseCoordinator:
         allocated_locs = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : req.kv_allocated_len
         ]
+        # 回收 decode 过程中由 alloc_extend / alloc_decode_debug 注册进 mapping、
+        # 但尚未通过 release_kv_cache → free_hisparse 归还的 hisparse 页。
+        # 清零 mapping 之前先把这部分 hisparse indices 还回池子，避免随后 free_hisparse
+        # 因 mapping 已被清零而翻译不出有效索引，导致 hisparse_attn_allocator 泄漏。
+        extra_hisparse_indices = (
+            self.token_to_kv_pool_allocator.full_to_hisparse_device_index_mapping[
+                allocated_locs
+            ]
+        )
+        extra_hisparse_indices = extra_hisparse_indices[extra_hisparse_indices > 0]
+        if extra_hisparse_indices.numel() > 0:
+            self.token_to_kv_pool_allocator.free_hisparse_indices(
+                extra_hisparse_indices
+            )
         self.token_to_kv_pool_allocator.full_to_hisparse_device_index_mapping[
             allocated_locs
         ] = 0
