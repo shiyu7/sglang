@@ -170,6 +170,27 @@ class HiSparseCoordinator:
         parts.append(self._allocator_snapshot())
         print(" ".join(parts), flush=True)
 
+    def _debug_pages(self, indices: torch.Tensor) -> list[int]:
+        valid = indices[indices > 0]
+        if valid.numel() == 0:
+            return []
+        return torch.unique(valid // self.token_to_kv_pool_allocator.page_size).tolist()
+
+    def _debug_positions_for_pages(
+        self, values: torch.Tensor, pages: list[int]
+    ) -> dict[int, list[int]]:
+        valid = values > 0
+        if not torch.any(valid):
+            return {}
+
+        positions = torch.arange(values.numel(), device=values.device)
+        out: dict[int, list[int]] = {}
+        for page in pages:
+            mask = valid & ((values // self.token_to_kv_pool_allocator.page_size) == page)
+            if torch.any(mask):
+                out[page] = positions[mask].tolist()
+        return out
+
     def set_decode_producer_stream(self, stream) -> None:
         self.decode_producer_stream = stream
 
@@ -283,6 +304,18 @@ class HiSparseCoordinator:
         allocated_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : req.kv_allocated_len
         ]
+        if self.debug_print_enabled:
+            pre_mapping = self.token_to_kv_pool_allocator.full_to_hisparse_device_index_mapping[
+                allocated_indices
+            ]
+            pre_pages = self._debug_pages(pre_mapping)
+            print(
+                f"[HiSparseDebug] alloc_device_buffer.mapping_before "
+                f"rid={req.rid} req_pool_idx={req.req_pool_idx} "
+                f"mapping_pages={pre_pages} "
+                f"mapping_positions={self._debug_positions_for_pages(pre_mapping, pre_pages)}",
+                flush=True,
+            )
         page_size = self.mem_pool_device.page_size
         # Allocate only enough for current tokens (page-aligned).
         # When prefill already fills device_buffer_size, include the reserved page.
@@ -315,6 +348,14 @@ class HiSparseCoordinator:
         self.req_device_buffer_token_locs[:, req.req_pool_idx, :alloc_size] = (
             buffer_indices[:alloc_size]
         )
+        if self.debug_print_enabled:
+            print(
+                f"[HiSparseDebug] alloc_device_buffer.mapping_after "
+                f"rid={req.rid} req_pool_idx={req.req_pool_idx} "
+                f"buffer_pages={self._debug_pages(buffer_indices)} "
+                f"buffer_positions={self._debug_positions_for_pages(buffer_indices, self._debug_pages(buffer_indices))}",
+                flush=True,
+            )
         self._debug_print(
             "alloc_device_buffer.end",
             req,
@@ -465,6 +506,18 @@ class HiSparseCoordinator:
         ] = reserved_buffer_loc.to(torch.int32)
 
         # todo, clear the prior mapping as well
+        if self.debug_print_enabled:
+            for req_idx, out_loc, buffer_loc in zip(
+                req_pool_indices.tolist(),
+                out_cache_loc.tolist(),
+                reserved_buffer_loc.tolist(),
+            ):
+                print(
+                    f"[HiSparseDebug] map_last_loc_to_buffer "
+                    f"req_pool_idx={req_idx} out_cache_loc={out_loc} "
+                    f"buffer_loc={buffer_loc} buffer_page={buffer_loc // self.token_to_kv_pool_allocator.page_size}",
+                    flush=True,
+                )
         self.mem_pool_device.full_to_hisparse_device_index_mapping[out_cache_loc] = (
             reserved_buffer_loc
         )
@@ -723,8 +776,11 @@ class HiSparseCoordinator:
                 f"rid={req.rid} req_pool_idx={req.req_pool_idx} "
                 f"buffer_numel={int(valid_buffer.numel())} "
                 f"buffer_pages={buffer_pages.tolist()} "
+                f"buffer_positions={self._debug_positions_for_pages(valid_buffer, buffer_pages.tolist())} "
                 f"mapping_numel={int(valid_mapping.numel())} "
                 f"mapping_pages={mapping_pages.tolist()} "
+                f"mapping_positions={self._debug_positions_for_pages(valid_mapping, mapping_pages.tolist())} "
+                f"allocated_locs={allocated_locs.tolist()} "
                 f"overlap_pages={overlap_pages.tolist()}\n"
                 f"{''.join(_tb.format_stack())}",
                 flush=True,
