@@ -435,16 +435,33 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         if free_index.numel() == 0:
             return
 
+        import traceback as _tb
+        import os as _os
+        if _os.environ.get("SGLANG_DEBUG_HISPARSE_LEAK") == "1":
+            print(
+                f"[HiSparseDebug] free called with numel={int(free_index.numel())} "
+                f"logical_avail={self.logical_attn_allocator.available_size()} "
+                f"hisparse_avail={self.hisparse_attn_allocator.available_size()}\n"
+                f"{''.join(_tb.format_stack())}",
+                flush=True,
+            )
+
         if self.is_not_in_free_group:
             self.logical_attn_allocator.free(free_index)
             self.free_hisparse(free_index)
         else:
             self.free_group.append(free_index)
-        assert (
-            self.logical_attn_allocator.available_size()
-            <= self.logical_attn_allocator.size
-        )
-        assert (
-            self.hisparse_attn_allocator.available_size()
-            <= self.hisparse_attn_allocator.size
-        )
+
+        _logical_avail = self.logical_attn_allocator.available_size()
+        _hisparse_avail = self.hisparse_attn_allocator.available_size()
+        if _logical_avail > self.logical_attn_allocator.size or _hisparse_avail > self.hisparse_attn_allocator.size:
+            print(
+                f"[HiSparseDebug] ASSERTION WOULD FAIL  "
+                f"logical_avail={_logical_avail}/{self.logical_attn_allocator.size}  "
+                f"hisparse_avail={_hisparse_avail}/{self.hisparse_attn_allocator.size}\n"
+                f"free_index={free_index.tolist()}\n"
+                f"{''.join(_tb.format_stack())}",
+                flush=True,
+            )
+        assert _logical_avail <= self.logical_attn_allocator.size
+        assert _hisparse_avail <= self.hisparse_attn_allocator.size
