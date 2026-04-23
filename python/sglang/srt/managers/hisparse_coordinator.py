@@ -703,11 +703,42 @@ class HiSparseCoordinator:
             ]
         )
 
+        if self.debug_print_enabled:
+            import traceback as _tb
+
+            page_size = self.token_to_kv_pool_allocator.page_size
+            valid_buffer = buffer_indices[buffer_indices > 0]
+            valid_mapping = mapping_hisparse[mapping_hisparse > 0]
+            buffer_pages = torch.unique(valid_buffer // page_size)
+            mapping_pages = torch.unique(valid_mapping // page_size)
+            overlap_pages = torch.tensor([], dtype=torch.int64, device=self.device)
+            if buffer_pages.numel() > 0 and mapping_pages.numel() > 0:
+                overlap_pages = torch.tensor(
+                    sorted(set(buffer_pages.tolist()) & set(mapping_pages.tolist())),
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+            print(
+                f"[HiSparseDebug] request_finished.hisparse_free_plan "
+                f"rid={req.rid} req_pool_idx={req.req_pool_idx} "
+                f"buffer_numel={int(valid_buffer.numel())} "
+                f"buffer_pages={buffer_pages.tolist()} "
+                f"mapping_numel={int(valid_mapping.numel())} "
+                f"mapping_pages={mapping_pages.tolist()} "
+                f"overlap_pages={overlap_pages.tolist()}\n"
+                f"{''.join(_tb.format_stack())}",
+                flush=True,
+            )
+
         all_hisparse = torch.cat([buffer_indices, mapping_hisparse])
         all_hisparse = all_hisparse[all_hisparse > 0]
         if all_hisparse.numel() > 0:
             all_hisparse = torch.unique(all_hisparse)
-            self.token_to_kv_pool_allocator.free_hisparse_indices(all_hisparse)
+            self.token_to_kv_pool_allocator.free_hisparse_indices(
+                all_hisparse,
+                caller="hisparse_coordinator.request_finished",
+                emit_trace=True,
+            )
 
         self.token_to_kv_pool_allocator.full_to_hisparse_device_index_mapping[
             allocated_locs
