@@ -258,7 +258,25 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
     def free_hisparse_indices(self, buffer_indices: torch.Tensor):
         # disable free group mechanism for device buffer free
         self.hisparse_attn_allocator.is_not_in_free_group = True
-        self.hisparse_attn_allocator.free(buffer_indices[buffer_indices > 0])
+        import os as _os
+        if _os.environ.get("SGLANG_DEBUG_HISPARSE_LEAK") == "1":
+            _before = self.hisparse_attn_allocator.available_size()
+            _valid = buffer_indices[buffer_indices > 0]
+            print(
+                f"[HiSparseDebug] free_hisparse_indices.begin "
+                f"input_numel={int(buffer_indices.numel())} valid_numel={int(_valid.numel())} "
+                f"hisparse_available_before={_before}",
+                flush=True,
+            )
+            self.hisparse_attn_allocator.free(_valid)
+            _after = self.hisparse_attn_allocator.available_size()
+            print(
+                f"[HiSparseDebug] free_hisparse_indices.end "
+                f"hisparse_available_after={_after} delta={_after - _before}",
+                flush=True,
+            )
+        else:
+            self.hisparse_attn_allocator.free(buffer_indices[buffer_indices > 0])
 
     def get_last_loc_hisparse_device(self, last_locs: torch.Tensor):
         hisparse_last_locs = self._kvcache._translate_loc_to_hisparse_device(last_locs)
@@ -314,6 +332,17 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
         self.full_to_hisparse_device_index_mapping[logical_indices] = hisparse_indices
 
+        import os as _os
+        if _os.environ.get("SGLANG_DEBUG_HISPARSE_LEAK") == "1":
+            print(
+                f"[HiSparseDebug] alloc_extend "
+                f"logical_numel={int(logical_indices.numel())} "
+                f"hisparse_numel={int(hisparse_indices.numel())} "
+                f"num_new_pages={int(num_new_pages)} "
+                f"hisparse_available={self.hisparse_attn_allocator.available_size()} "
+                f"logical_available={self.logical_attn_allocator.available_size()}",
+                flush=True,
+            )
         return logical_indices
 
     def alloc_decode(
@@ -350,13 +379,42 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
         self.full_to_hisparse_device_index_mapping[logical_indices] = hisparse_indices
 
+        import os as _os
+        if _os.environ.get("SGLANG_DEBUG_HISPARSE_LEAK") == "1":
+            print(
+                f"[HiSparseDebug] alloc_decode_debug "
+                f"logical_numel={int(logical_indices.numel())} "
+                f"hisparse_numel={int(hisparse_indices.numel())} "
+                f"hisparse_available={self.hisparse_attn_allocator.available_size()} "
+                f"logical_available={self.logical_attn_allocator.available_size()}",
+                flush=True,
+            )
+
         return logical_indices
 
     def free_hisparse(self, free_indices: torch.Tensor):
+        import os as _os
+        _dbg = _os.environ.get("SGLANG_DEBUG_HISPARSE_LEAK") == "1"
+        if _dbg:
+            _before = self.hisparse_attn_allocator.available_size()
+            print(
+                f"[HiSparseDebug] free_hisparse.begin "
+                f"free_indices_numel={int(free_indices.numel())} "
+                f"hisparse_available_before={_before}",
+                flush=True,
+            )
         hisparse_indices = self._kvcache._translate_loc_to_hisparse_device(free_indices)
         hisparse_indices = hisparse_indices[hisparse_indices > 0]
         self.free_hisparse_indices(hisparse_indices)
         self.full_to_hisparse_device_index_mapping[free_indices] = 0
+        if _dbg:
+            _after = self.hisparse_attn_allocator.available_size()
+            print(
+                f"[HiSparseDebug] free_hisparse.end "
+                f"translated_numel={int(hisparse_indices.numel())} "
+                f"hisparse_available_after={_after} delta={_after - _before}",
+                flush=True,
+            )
 
     def clear(self):
         self.logical_attn_allocator.clear()
