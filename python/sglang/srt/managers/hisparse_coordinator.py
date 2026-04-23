@@ -691,28 +691,24 @@ class HiSparseCoordinator:
             self._backup_done_event.wait(device_module.current_stream())
             self._has_pending_backup = False
 
-        # release memory — only free actually-allocated buffer indices
         current_cap = int(self.req_device_buffer_size[req.req_pool_idx])
         buffer_indices = self.req_to_device_buffer[req.req_pool_idx, :current_cap]
-        self.token_to_kv_pool_allocator.free_hisparse_indices(buffer_indices)
 
         allocated_locs = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : req.kv_allocated_len
         ]
-        extra_hisparse_indices = (
+        mapping_hisparse = (
             self.token_to_kv_pool_allocator.full_to_hisparse_device_index_mapping[
                 allocated_locs
             ]
         )
-        extra_hisparse_indices = extra_hisparse_indices[extra_hisparse_indices > 0]
-        if extra_hisparse_indices.numel() > 0 and buffer_indices.numel() > 0:
-            extra_hisparse_indices = extra_hisparse_indices[
-                ~torch.isin(extra_hisparse_indices, buffer_indices)
-            ]
-        if extra_hisparse_indices.numel() > 0:
-            self.token_to_kv_pool_allocator.free_hisparse_indices(
-                extra_hisparse_indices
-            )
+
+        all_hisparse = torch.cat([buffer_indices, mapping_hisparse])
+        all_hisparse = all_hisparse[all_hisparse > 0]
+        if all_hisparse.numel() > 0:
+            all_hisparse = torch.unique(all_hisparse)
+            self.token_to_kv_pool_allocator.free_hisparse_indices(all_hisparse)
+
         self.token_to_kv_pool_allocator.full_to_hisparse_device_index_mapping[
             allocated_locs
         ] = 0
