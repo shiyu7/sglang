@@ -382,11 +382,50 @@ class HiSparseTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         assert logical_indices is not None, "Logical allocation failed in alloc_extend"
 
         hisparse_last_loc = self.get_last_loc_hisparse_device(last_loc)
+        hisparse_prefix_lens = prefix_lens
+        hisparse_prefix_lens_cpu = prefix_lens_cpu
+        hisparse_seq_lens = seq_lens
+        hisparse_seq_lens_cpu = seq_lens_cpu
+
+        missing_hisparse_prefix = hisparse_last_loc <= 0
+        if torch.any(missing_hisparse_prefix):
+            extend_lens = seq_lens - prefix_lens
+            extend_lens_cpu = seq_lens_cpu - prefix_lens_cpu
+
+            hisparse_prefix_lens = prefix_lens.clone()
+            hisparse_prefix_lens_cpu = prefix_lens_cpu.clone()
+            hisparse_seq_lens = seq_lens.clone()
+            hisparse_seq_lens_cpu = seq_lens_cpu.clone()
+            hisparse_last_loc = hisparse_last_loc.clone()
+
+            hisparse_prefix_lens[missing_hisparse_prefix] = 0
+            hisparse_prefix_lens_cpu[missing_hisparse_prefix.cpu()] = 0
+            hisparse_seq_lens[missing_hisparse_prefix] = extend_lens[
+                missing_hisparse_prefix
+            ]
+            hisparse_seq_lens_cpu[missing_hisparse_prefix.cpu()] = extend_lens_cpu[
+                missing_hisparse_prefix.cpu()
+            ]
+            hisparse_last_loc[missing_hisparse_prefix] = -1
+
+            if self._debug_hisparse_leak_enabled():
+                print(
+                    f"[HiSparseDebug] alloc_extend.remap_missing_prefix "
+                    f"missing_mask={missing_hisparse_prefix.tolist()} "
+                    f"orig_prefix_lens={prefix_lens_cpu.tolist()} "
+                    f"orig_seq_lens={seq_lens_cpu.tolist()} "
+                    f"new_prefix_lens={hisparse_prefix_lens_cpu.tolist()} "
+                    f"new_seq_lens={hisparse_seq_lens_cpu.tolist()} "
+                    f"orig_last_loc={self.get_last_loc_hisparse_device(last_loc).tolist()} "
+                    f"new_last_loc={hisparse_last_loc.tolist()}",
+                    flush=True,
+                )
+
         hisparse_indices = self.hisparse_attn_allocator.alloc_extend(
-            prefix_lens,
-            prefix_lens_cpu,
-            seq_lens,
-            seq_lens_cpu,
+            hisparse_prefix_lens,
+            hisparse_prefix_lens_cpu,
+            hisparse_seq_lens,
+            hisparse_seq_lens_cpu,
             hisparse_last_loc,
             len(logical_indices),
         )
