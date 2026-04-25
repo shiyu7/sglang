@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 import torch
@@ -11,6 +12,10 @@ if _is_cuda:
 
 if _is_cuda:
     from sgl_kernel import moe_sum_reduce, silu_and_mul
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).lower() in ("1", "true", "yes", "on")
 
 
 def get_scalar_type(
@@ -197,7 +202,27 @@ def fused_marlin_moe(
         is_zp_float=False,
     )
 
-    silu_and_mul(intermediate_cache1.view(-1, 2 * N), intermediate_cache2)
+    silu_and_mul_input = intermediate_cache1.view(-1, 2 * N)
+
+    # DEBUG knob: swap the two halves of the SwiGLU input before silu_and_mul.
+    # sgl-kernel's ``silu_and_mul`` computes ``silu(x[..., :N]) * x[..., N:]``,
+    # i.e. it treats the first half as ``gate (w1)`` and the second half as
+    # ``up (w3)``. The Marlin MXFP4 path above assumes the checkpoint weights
+    # are packed in native ``[w1; w3]`` order (see prepare_moe_mxfp4_layer_for_marlin).
+    # If a particular FP4 checkpoint was actually packed as ``[w3; w1]`` (or the
+    # TP split reshuffled the halves), enabling this flag lets us A/B that
+    # assumption without rebuilding the kernel:
+    #
+    #     SGLANG_MARLIN_MOE_SWAP_W1_W3=1
+    #
+    # When the flag is on, the two halves of the SwiGLU input are swapped in
+    # place so that the second half is used as the SiLU argument.
+    if _env_flag("SGLANG_MARLIN_MOE_SWAP_W1_W3"):
+        # (M*topk, 2, N) -> flip the "2" dim -> (M*topk, 2*N) again
+        swapped = silu_and_mul_input.view(-1, 2, N).flip(dims=[1])
+        silu_and_mul_input = swapped.reshape(-1, 2 * N).contiguous()
+
+    silu_and_mul(silu_and_mul_input, intermediate_cache2)
 
     if expert_map is not None:
         intermediate_cache3.zero_()
