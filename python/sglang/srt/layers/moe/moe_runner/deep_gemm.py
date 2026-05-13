@@ -176,6 +176,10 @@ class DeepGemmRunnerCore(MoeRunnerCore):
         recipe_a, recipe_b = (
             ((1, 128), (1, 32)) if quant_info.is_fp4_experts else (None, None)
         )
+        use_sm90_fp8_fp4_contig = (
+            quant_info.is_fp4_experts
+            and deep_gemm_wrapper.ENABLE_DEEPGEMM_SM90_FP8_FP4_CONTIG
+        )
 
         w13_weight_fp8 = (
             quant_info.w13_weight,
@@ -188,17 +192,28 @@ class DeepGemmRunnerCore(MoeRunnerCore):
             device=hidden_states_device,
             dtype=torch.bfloat16,
         )
-        if deep_gemm_wrapper.DEEPGEMM_NEED_TMA_ALIGNED_SCALES:
+        if (
+            deep_gemm_wrapper.DEEPGEMM_NEED_TMA_ALIGNED_SCALES
+            and not use_sm90_fp8_fp4_contig
+        ):
             hidden_states_scale = tma_align_input_scale(hidden_states_scale)
 
-        deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_contig(
-            (hidden_states, hidden_states_scale),
-            w13_weight_fp8,
-            gateup_output,
-            m_indices,
-            recipe_a=recipe_a,
-            recipe_b=recipe_b,
-        )
+        if use_sm90_fp8_fp4_contig:
+            deep_gemm_wrapper.grouped_gemm_nt_f8fp4bf16_contig(
+                (hidden_states, hidden_states_scale),
+                w13_weight_fp8,
+                gateup_output,
+                m_indices,
+            )
+        else:
+            deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_contig(
+                (hidden_states, hidden_states_scale),
+                w13_weight_fp8,
+                gateup_output,
+                m_indices,
+                recipe_a=recipe_a,
+                recipe_b=recipe_b,
+            )
 
         dispose_tensor(hidden_states)
         dispose_tensor(hidden_states_scale)
@@ -265,17 +280,28 @@ class DeepGemmRunnerCore(MoeRunnerCore):
             device=hidden_states_device,
             dtype=torch.bfloat16,
         )
-        if deep_gemm_wrapper.DEEPGEMM_NEED_TMA_ALIGNED_SCALES:
+        if (
+            deep_gemm_wrapper.DEEPGEMM_NEED_TMA_ALIGNED_SCALES
+            and not use_sm90_fp8_fp4_contig
+        ):
             down_input_scale = tma_align_input_scale(down_input_scale)
 
-        deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_contig(
-            (down_input_fp8, down_input_scale),
-            w2_weight_fp8,
-            down_output,
-            m_indices,
-            recipe_a=recipe_a,
-            recipe_b=recipe_b,
-        )
+        if use_sm90_fp8_fp4_contig:
+            deep_gemm_wrapper.grouped_gemm_nt_f8fp4bf16_contig(
+                (down_input_fp8, down_input_scale),
+                w2_weight_fp8,
+                down_output,
+                m_indices,
+            )
+        else:
+            deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_contig(
+                (down_input_fp8, down_input_scale),
+                w2_weight_fp8,
+                down_output,
+                m_indices,
+                recipe_a=recipe_a,
+                recipe_b=recipe_b,
+            )
 
         return down_output
 

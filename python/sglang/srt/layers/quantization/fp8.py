@@ -1190,7 +1190,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     build_mega_moe_experts_weights(layer)
                     return
 
-                if deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0 and will_use_deepgemm:
+                use_sm90_fp8_fp4_contig = (
+                    will_use_deepgemm
+                    and deep_gemm_wrapper.ENABLE_DEEPGEMM_SM90_FP8_FP4_CONTIG
+                )
+                if use_sm90_fp8_fp4_contig:
+                    layer.w13_weight_scale_inv.deepgemm_sm90_fp8_fp4_canonical = True
+                    layer.w2_weight_scale_inv.deepgemm_sm90_fp8_fp4_canonical = True
+                elif deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0 and will_use_deepgemm:
                     from deep_gemm import transform_sf_into_required_layout
 
                     for scale_param, weight_param in [

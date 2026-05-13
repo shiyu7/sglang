@@ -10,6 +10,7 @@ from sglang.srt.layers.deep_gemm_wrapper.configurer import (  # noqa: F401
     DEEPGEMM_BLACKWELL,
     DEEPGEMM_NEED_TMA_ALIGNED_SCALES,
     DEEPGEMM_SCALE_UE8M0,
+    ENABLE_DEEPGEMM_SM90_FP8_FP4_CONTIG,
     ENABLE_JIT_DEEPGEMM,
 )
 from sglang.srt.server_args import ServerArgs
@@ -113,6 +114,95 @@ def grouped_gemm_nt_f8f8bf16_contig(
     with compile_utils.deep_gemm_execution_hook(m, n, k, num_groups, kernel_type):
         deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
             lhs, rhs, out, m_indices, **fp4_kwargs
+        )
+
+
+def _get_sm90_fp8_fp4_tile_overrides(m: int, n: int, num_groups: int):
+    if m >= num_groups * 256 and n >= 1024:
+        return 256, 64
+    return None, None
+
+
+def _check_fp8_fp4_contig_inputs(
+    lhs: Tuple[torch.Tensor, torch.Tensor],
+    rhs: Tuple[torch.Tensor, torch.Tensor],
+    out: torch.Tensor,
+    m_indices: torch.Tensor,
+):
+    lhs_data, lhs_scale = lhs
+    rhs_data, rhs_scale = rhs
+
+    assert lhs_data.dtype == torch.float8_e4m3fn, lhs_data.dtype
+    assert rhs_data.dtype == torch.int8, rhs_data.dtype
+    assert rhs_scale.dtype == torch.float32, rhs_scale.dtype
+    assert not getattr(rhs_scale, "format_ue8m0", False), (
+        "SM90 FP8-FP4 fused DeepGEMM path expects canonical FP4 scales, "
+        "not pre-transformed UE8M0 scales."
+    )
+    assert out.dtype == torch.bfloat16, out.dtype
+    assert m_indices.dtype == torch.int32, m_indices.dtype
+
+    m, k = lhs_data.shape
+    num_groups, n, half_k = rhs_data.shape
+    assert half_k * 2 == k, f"{rhs_data.shape=} is not packed FP4 for {k=}"
+    assert out.shape == (m, n), f"{out.shape=} != {(m, n)}"
+    assert m_indices.shape == (m,), f"{m_indices.shape=} != {(m,)}"
+    assert lhs_scale.shape == (
+        m,
+        (k + 127) // 128,
+    ), f"{lhs_scale.shape=} is not canonical FP8 activation scale"
+    assert rhs_scale.shape == (
+        num_groups,
+        n,
+        (k + 127) // 128,
+    ), f"{rhs_scale.shape=} is not canonical FP4 weight scale"
+
+
+def grouped_gemm_nt_f8fp4bf16_contig(
+    lhs: Tuple[torch.Tensor, torch.Tensor],
+    rhs: Tuple[torch.Tensor, torch.Tensor],
+    out: torch.Tensor,
+    m_indices: torch.Tensor,
+    block_m_override: Optional[int] = None,
+    block_n_override: Optional[int] = None,
+    decode_stub: bool = False,
+):
+    m, k = lhs[0].shape
+    num_groups, n, _ = rhs[0].shape
+    kernel_type = compile_utils.DeepGemmKernelType.GROUPED_GEMM_NT_F8FP4BF16_CONTIG_SM90
+
+    if m == 0:
+        return
+
+    if not ENABLE_DEEPGEMM_SM90_FP8_FP4_CONTIG:
+        return grouped_gemm_nt_f8f8bf16_contig(
+            lhs,
+            rhs,
+            out,
+            m_indices,
+            recipe_a=(1, 128),
+            recipe_b=(1, 32),
+        )
+
+    _check_fp8_fp4_contig_inputs(lhs, rhs, out, m_indices)
+
+    if block_m_override is None and block_n_override is None:
+        block_m_override, block_n_override = _get_sm90_fp8_fp4_tile_overrides(
+            m, n, num_groups
+        )
+
+    with compile_utils.deep_gemm_execution_hook(m, n, k, num_groups, kernel_type):
+        deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous_sm90_fused_wgmma(
+            lhs,
+            rhs,
+            out,
+            m_indices,
+            gran_k=128,
+            compiled_dims="nk",
+            use_psum_layout=False,
+            block_m_override=block_m_override,
+            block_n_override=block_n_override,
+            decode_stub=decode_stub,
         )
 
 
