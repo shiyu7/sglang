@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+from sglang.srt.environ import envs
 from sglang.srt.layers.moe.moe_runner.base import (
     MoeQuantInfo,
     MoeRunnerConfig,
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     )
 
 MARLIN_MOE_WORKSPACE: Optional[torch.Tensor] = None
+_MARLIN_DEBUG_LOGGED = False
 
 
 @dataclass
@@ -80,12 +82,14 @@ def fused_experts_none_to_marlin(
     runner_config: MoeRunnerConfig,
 ) -> StandardCombineInput:
     global MARLIN_MOE_WORKSPACE
+    global _MARLIN_DEBUG_LOGGED
     from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import fused_marlin_moe
     from sglang.srt.layers.moe.token_dispatcher.standard import StandardCombineInput
     from sglang.srt.layers.quantization.marlin_utils import marlin_make_workspace
 
     hidden_states = dispatch_output.hidden_states
     topk_output = dispatch_output.topk_output
+    debug_sync = envs.SGLANG_MARLIN_MOE_DEBUG_SYNC.get()
 
     assert runner_config.activation == "silu", "Only SiLU activation is supported."
 
@@ -115,6 +119,24 @@ def fused_experts_none_to_marlin(
         marlin_hidden_states = hidden_states.to(torch.bfloat16)
         marlin_inplace = False
 
+    if debug_sync:
+        if not _MARLIN_DEBUG_LOGGED:
+            print(
+                "[SGLang Marlin MoE debug] "
+                f"hidden={tuple(hidden_states.shape)} {hidden_states.dtype} "
+                f"w13={tuple(quant_info.w13_qweight.shape)} {quant_info.w13_qweight.dtype} "
+                f"w2={tuple(quant_info.w2_qweight.shape)} {quant_info.w2_qweight.dtype} "
+                f"w13_scale={tuple(quant_info.w13_scales.shape)} {quant_info.w13_scales.dtype} "
+                f"w2_scale={tuple(quant_info.w2_scales.shape)} {quant_info.w2_scales.dtype} "
+                f"topk_ids={tuple(topk_output.topk_ids.shape)} {topk_output.topk_ids.dtype} "
+                f"topk_weights={tuple(topk_output.topk_weights.shape)} {topk_output.topk_weights.dtype} "
+                f"router_logits={tuple(topk_output.router_logits.shape)} {topk_output.router_logits.dtype} "
+                f"weight_bits={quant_info.weight_bits} is_k_full={quant_info.is_k_full}",
+                flush=True,
+            )
+            _MARLIN_DEBUG_LOGGED = True
+        torch.cuda.synchronize(hidden_states.device)
+
     output = fused_marlin_moe(
         hidden_states=marlin_hidden_states,
         w1=quant_info.w13_qweight,
@@ -137,7 +159,12 @@ def fused_experts_none_to_marlin(
         inplace=marlin_inplace,
         routed_scaling_factor=runner_config.routed_scaling_factor,
         clamp_limit=runner_config.swiglu_limit,
-    ).to(hidden_states.dtype)
+    )
+    if debug_sync:
+        torch.cuda.synchronize(hidden_states.device)
+    output = output.to(hidden_states.dtype)
+    if debug_sync:
+        torch.cuda.synchronize(hidden_states.device)
 
     return StandardCombineInput(
         hidden_states=output,

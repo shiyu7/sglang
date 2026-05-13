@@ -96,6 +96,95 @@ class HashTopK(nn.Module):
 
         return topk_weights, topk_ids
 
+    def _debug_fused_hash_topk_inputs(
+        self, router_logits: torch.Tensor, input_ids: torch.Tensor
+    ) -> None:
+        with torch.no_grad():
+            num_tokens = input_ids.numel()
+            tid2eid_rows, tid2eid_topk = self.tid2eid.shape
+            num_routed_experts = router_logits.shape[1]
+            msg = (
+                "HashTopK debug: "
+                f"num_tokens={num_tokens}, "
+                f"router_logits(shape={tuple(router_logits.shape)}, "
+                f"dtype={router_logits.dtype}, "
+                f"device={router_logits.device}, "
+                f"is_contiguous={router_logits.is_contiguous()}), "
+                f"input_ids(shape={tuple(input_ids.shape)}, "
+                f"dtype={input_ids.dtype}, device={input_ids.device}), "
+                f"tid2eid(shape={tuple(self.tid2eid.shape)}, "
+                f"dtype={self.tid2eid.dtype}, device={self.tid2eid.device}), "
+                f"topk={self.topk}, routed_topk={tid2eid_topk}, "
+                f"num_experts={self.num_experts}, "
+                f"num_routed_experts={num_routed_experts}, "
+                f"num_fused_shared_experts={self.num_fused_shared_experts}"
+            )
+
+            if num_tokens == 0:
+                logger.warning("%s, empty input_ids", msg)
+                return
+
+            input_min = int(input_ids.min().item())
+            input_max = int(input_ids.max().item())
+            bad_token_mask = (input_ids < 0) | (input_ids >= tid2eid_rows)
+            bad_token_count = int(bad_token_mask.sum().item())
+            msg = (
+                f"{msg}, input_ids_min={input_min}, "
+                f"input_ids_max={input_max}, "
+                f"bad_token_count={bad_token_count}"
+            )
+
+            if bad_token_count > 0:
+                bad_pos = int(bad_token_mask.nonzero()[0].item())
+                bad_token = int(input_ids[bad_pos].item())
+                logger.error(
+                    "%s, first_bad_token_pos=%d, first_bad_token=%d",
+                    msg,
+                    bad_pos,
+                    bad_token,
+                )
+                raise RuntimeError(
+                    "HashTopK fused kernel would read tid2eid out of bounds: "
+                    f"input_ids[{bad_pos}]={bad_token}, tid2eid_rows={tid2eid_rows}"
+                )
+
+            selected_tid2eid = self.tid2eid[input_ids]
+            eid_min = int(selected_tid2eid.min().item())
+            eid_max = int(selected_tid2eid.max().item())
+            bad_eid_mask = (selected_tid2eid < 0) | (
+                selected_tid2eid >= num_routed_experts
+            )
+            bad_eid_count = int(bad_eid_mask.sum().item())
+            msg = (
+                f"{msg}, selected_tid2eid_min={eid_min}, "
+                f"selected_tid2eid_max={eid_max}, "
+                f"bad_selected_eid_count={bad_eid_count}"
+            )
+
+            if bad_eid_count > 0:
+                bad_pos = bad_eid_mask.nonzero()[0]
+                bad_token_row = int(bad_pos[0].item())
+                bad_topk_col = int(bad_pos[1].item())
+                bad_token = int(input_ids[bad_token_row].item())
+                bad_eid = int(selected_tid2eid[bad_token_row, bad_topk_col].item())
+                logger.error(
+                    "%s, first_bad_eid_token_row=%d, first_bad_token=%d, "
+                    "first_bad_eid_col=%d, first_bad_eid=%d",
+                    msg,
+                    bad_token_row,
+                    bad_token,
+                    bad_topk_col,
+                    bad_eid,
+                )
+                raise RuntimeError(
+                    "HashTopK fused kernel would read router_logits out of bounds: "
+                    f"tid2eid[input_ids[{bad_token_row}]={bad_token}, "
+                    f"{bad_topk_col}]={bad_eid}, "
+                    f"num_routed_experts={num_routed_experts}"
+                )
+
+            logger.warning("%s", msg)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -110,6 +199,9 @@ class HashTopK(nn.Module):
 
         if envs.SGLANG_OPT_USE_FUSED_HASH_TOPK.get():
             from sglang.jit_kernel.deepseek_v4 import hash_topk
+
+            if envs.SGLANG_HASH_TOPK_DEBUG.get():
+                self._debug_fused_hash_topk_inputs(router_logits, input_ids)
 
             topk_weights, topk_ids = hash_topk(
                 router_logits=router_logits,
