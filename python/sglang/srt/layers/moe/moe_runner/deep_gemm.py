@@ -179,6 +179,7 @@ class DeepGemmRunnerCore(MoeRunnerCore):
         use_sm90_fp8_fp4_contig = (
             quant_info.is_fp4_experts
             and deep_gemm_wrapper.ENABLE_DEEPGEMM_SM90_FP8_FP4_CONTIG
+            and running_state.get("use_sm90_fp8_fp4_contig", False)
         )
 
         w13_weight_fp8 = (
@@ -598,6 +599,10 @@ def pre_permute_deepep_normal_to_deep_gemm(
 
     all_tokens = sum(num_recv_tokens_per_expert)
     running_state["all_tokens"] = all_tokens
+    running_state["use_sm90_fp8_fp4_contig"] = all(
+        num_tokens == 0 or num_tokens % 256 == 0
+        for num_tokens in num_recv_tokens_per_expert
+    )
 
     K = hidden_states.shape[1]
 

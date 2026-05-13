@@ -22,6 +22,7 @@ if ENABLE_JIT_DEEPGEMM:
     from deep_gemm.utils.layout import get_mn_major_tma_aligned_tensor  # noqa: F401
 
 _SANITY_CHECK = envs.SGLANG_DEEPGEMM_SANITY_CHECK.get()
+_SM90_FP8_FP4_CONTIG_LOGGED = False
 
 
 # TODO maybe rename these functions
@@ -185,6 +186,18 @@ def grouped_gemm_nt_f8fp4bf16_contig(
         )
 
     _check_fp8_fp4_contig_inputs(lhs, rhs, out, m_indices)
+
+    global _SM90_FP8_FP4_CONTIG_LOGGED
+    if not _SM90_FP8_FP4_CONTIG_LOGGED:
+        logger.info(
+            "Using DeepGEMM SM90 FP8-FP4 fused contiguous grouped GEMM "
+            "for shape m=%s n=%s k=%s num_groups=%s.",
+            m,
+            n,
+            k,
+            num_groups,
+        )
+        _SM90_FP8_FP4_CONTIG_LOGGED = True
 
     if block_m_override is None and block_n_override is None:
         block_m_override, block_n_override = _get_sm90_fp8_fp4_tile_overrides(
