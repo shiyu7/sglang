@@ -100,6 +100,8 @@ class HashTopK(nn.Module):
         self, router_logits: torch.Tensor, input_ids: torch.Tensor
     ) -> None:
         with torch.no_grad():
+            from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
+
             num_tokens = input_ids.numel()
             tid2eid_rows, tid2eid_topk = self.tid2eid.shape
             num_routed_experts = router_logits.shape[1]
@@ -119,6 +121,13 @@ class HashTopK(nn.Module):
                 f"num_routed_experts={num_routed_experts}, "
                 f"num_fused_shared_experts={self.num_fused_shared_experts}"
             )
+
+            if get_is_capture_mode():
+                logger.warning(
+                    "%s, skip range checks because CUDA graph is capturing",
+                    msg,
+                )
+                return
 
             if num_tokens == 0:
                 logger.warning("%s, empty input_ids", msg)
