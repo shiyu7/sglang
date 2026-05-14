@@ -523,6 +523,7 @@ class MQALayer(nn.Module):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         if not get_attn_tp_context().input_scattered and x.shape[0] == 0:
+            print(self.wo_b.reduce_results)
             return x
 
         attn_backend = forward_batch.attn_backend
