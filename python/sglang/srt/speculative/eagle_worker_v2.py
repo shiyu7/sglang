@@ -1,5 +1,6 @@
 import contextlib
 import logging
+import os
 import time
 from typing import List, Optional, Tuple
 
@@ -84,6 +85,29 @@ _is_musa = is_musa()
 _is_hip = is_hip()
 
 logger = logging.getLogger(__name__)
+
+
+def _maybe_debug_sync_mtp_verify(
+    device: str,
+    phase: str,
+    batch: Optional[ScheduleBatch] = None,
+    can_run_cuda_graph: Optional[bool] = None,
+) -> None:
+    if os.environ.get("SGLANG_DEBUG_MTP_VERIFY_SYNC") != "1":
+        return
+
+    try:
+        torch.get_device_module(device).synchronize()
+    except Exception:
+        logger.exception(
+            "SGLANG_DEBUG_MTP_VERIFY_SYNC failed at phase=%s bs=%s "
+            "can_run_cuda_graph=%s forward_mode=%s",
+            phase,
+            len(batch.seq_lens) if batch is not None else None,
+            can_run_cuda_graph,
+            batch.forward_mode if batch is not None else None,
+        )
+        raise
 
 
 def _get_plan_stream(
@@ -988,6 +1012,12 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     self.target_worker,
                 )
             )
+        _maybe_debug_sync_mtp_verify(
+            self.device,
+            "after_prepare_for_v2_verify",
+            batch=batch,
+            can_run_cuda_graph=can_run_cuda_graph,
+        )
 
         # Cover post-prepare rebinds: draft_token, plan_stream-allocated out_cache_loc.
         record_stream_each((batch.input_ids, batch.out_cache_loc), fwd_stream)
@@ -1021,6 +1051,12 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     else None
                 ),
             )
+            _maybe_debug_sync_mtp_verify(
+                self.device,
+                "after_update_verify_buffers_to_fill_after_draft",
+                batch=batch,
+                can_run_cuda_graph=can_run_cuda_graph,
+            )
 
         # Prepare grammar data on CPU if needed
         if batch.has_grammar:
@@ -1038,6 +1074,12 @@ class EAGLEWorkerV2(BaseSpecWorker):
             skip_attn_backend_init=True,
         )
         logits_output = forward_batch_output.logits_output
+        _maybe_debug_sync_mtp_verify(
+            self.device,
+            "after_target_verify_forward",
+            batch=batch,
+            can_run_cuda_graph=can_run_cuda_graph,
+        )
 
         # Generate vocab mask for constrained decoding
         vocab_mask = None
@@ -1067,6 +1109,12 @@ class EAGLEWorkerV2(BaseSpecWorker):
             accept_index,
         ) = verify_input.sample(batch, logits_output, vocab_mask)
         new_seq_lens = batch.seq_lens + accept_lens
+        _maybe_debug_sync_mtp_verify(
+            self.device,
+            "after_verify_sample",
+            batch=batch,
+            can_run_cuda_graph=can_run_cuda_graph,
+        )
 
         # Update mamba state for hybrid GDN models after verification
         if (
@@ -1079,6 +1127,12 @@ class EAGLEWorkerV2(BaseSpecWorker):
 
         verify_done = torch.get_device_module(self.device).Event()
         verify_done.record()
+        _maybe_debug_sync_mtp_verify(
+            self.device,
+            "after_verify_done_record",
+            batch=batch,
+            can_run_cuda_graph=can_run_cuda_graph,
+        )
 
         if not batch.forward_mode.is_idle():
             accept_tokens = predict[accept_index]
@@ -1089,12 +1143,24 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 bonus_tokens,
                 self.speculative_num_draft_tokens,
             )
+            _maybe_debug_sync_mtp_verify(
+                self.device,
+                "after_fill_bonus_tokens",
+                batch=batch,
+                can_run_cuda_graph=can_run_cuda_graph,
+            )
         else:
             bonus_tokens = torch.empty((0,), device=self.device, dtype=torch.int32)
 
         if batch.return_logprob and not batch.forward_mode.is_idle():
             compute_spec_v2_logprobs(
                 batch, logits_output, predict, accept_index, self.speculative_num_steps
+            )
+            _maybe_debug_sync_mtp_verify(
+                self.device,
+                "after_spec_logprobs",
+                batch=batch,
+                can_run_cuda_graph=can_run_cuda_graph,
             )
 
         next_draft_input = EagleDraftInput(
