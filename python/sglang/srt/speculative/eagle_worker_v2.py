@@ -827,6 +827,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
             ):
                 verify_input: EagleVerifyInput = self.draft_worker.draft(batch)
             assert verify_input.is_verify_input()
+            _maybe_debug_sync_mtp_verify(self.device, "after_draft", batch=batch)
             # Record a CUDA event after draft() GPU work is dispatched.
             # This event will be waited on by plan_stream in verify()
             # to ensure draft CUDA graph kernels finish before plan_stream

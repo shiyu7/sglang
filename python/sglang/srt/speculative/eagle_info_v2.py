@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -44,6 +46,31 @@ _is_cuda = is_cuda()
 _is_hip = is_hip()
 _is_npu = is_npu()
 _is_musa = is_musa()
+
+logger = logging.getLogger(__name__)
+
+
+def _maybe_debug_sync_mtp_verify_prepare(
+    device: Any,
+    phase: str,
+    batch: ScheduleBatch,
+    can_run_cuda_graph: bool | None = None,
+) -> None:
+    if os.environ.get("SGLANG_DEBUG_MTP_VERIFY_SYNC") != "1":
+        return
+
+    try:
+        torch.get_device_module(device).synchronize()
+    except Exception:
+        logger.exception(
+            "SGLANG_DEBUG_MTP_VERIFY_SYNC failed at phase=%s bs=%s "
+            "can_run_cuda_graph=%s forward_mode=%s",
+            phase,
+            len(batch.seq_lens),
+            can_run_cuda_graph,
+            batch.forward_mode,
+        )
+        raise
 
 if TYPE_CHECKING:
     from sglang.srt.managers.tp_worker import TpModelWorker
@@ -279,6 +306,11 @@ class EagleVerifyInputV2Mixin:
                 draft_token_num=self.draft_token_num,
                 device=device,
             )
+            _maybe_debug_sync_mtp_verify_prepare(
+                device,
+                "after_assign_verify_cache_locs",
+                batch,
+            )
 
             if get_global_server_args().enable_mamba_extra_buffer():
                 set_mamba_track_indices_from_reqs(batch)
@@ -303,6 +335,11 @@ class EagleVerifyInputV2Mixin:
         )
         batch.capture_hidden_mode = capture_mode
         verify_forward_batch = ForwardBatch.init_new(batch, target_worker.model_runner)
+        _maybe_debug_sync_mtp_verify_prepare(
+            batch.input_ids.device,
+            "after_verify_forward_batch_init",
+            batch,
+        )
 
         # Run attention backend plan and cuda graph preparation
         can_run_cuda_graph = bool(
@@ -311,10 +348,22 @@ class EagleVerifyInputV2Mixin:
         )
         if can_run_cuda_graph:
             target_worker.model_runner.graph_runner.replay_prepare(verify_forward_batch)
+            _maybe_debug_sync_mtp_verify_prepare(
+                batch.input_ids.device,
+                "after_target_graph_replay_prepare",
+                batch,
+                can_run_cuda_graph,
+            )
         else:
             if not batch.forward_mode.is_idle():
                 target_worker.model_runner.attn_backend.init_forward_metadata(
                     verify_forward_batch
+                )
+                _maybe_debug_sync_mtp_verify_prepare(
+                    batch.input_ids.device,
+                    "after_target_attn_metadata_init",
+                    batch,
+                    can_run_cuda_graph,
                 )
 
         return verify_forward_batch, can_run_cuda_graph
