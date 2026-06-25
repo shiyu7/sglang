@@ -86,6 +86,7 @@ class EagleDraftInputBuffers(ForwardInputBuffers):
     hidden_states: Optional[torch.Tensor]
     global_num_tokens_gpu: Optional[torch.Tensor]
     global_num_tokens_for_logprob_gpu: Optional[torch.Tensor]
+    dcp_kv_mask: Optional[torch.Tensor]
 
 
 class EAGLEDraftCudaGraphRunner:
@@ -162,6 +163,11 @@ class EAGLEDraftCudaGraphRunner:
             extend_seq_lens = torch.ones((self.max_bs,), dtype=torch.int32)
             topk_p = torch.zeros((self.max_bs, self.topk), dtype=torch.float32)
             topk_index = torch.zeros((self.max_bs, self.topk), dtype=torch.int64)
+            dcp_kv_mask = (
+                torch.zeros((self.max_num_token,), dtype=torch.bool)
+                if getattr(self.model_runner, "dcp_size", 1) > 1
+                else None
+            )
             _hidden_size = EagleDraftInput.hidden_size_for(self.eagle_worker)
             hidden_states = (
                 torch.zeros(
@@ -204,6 +210,7 @@ class EAGLEDraftCudaGraphRunner:
             hidden_states=hidden_states,
             global_num_tokens_gpu=global_num_tokens_gpu,
             global_num_tokens_for_logprob_gpu=global_num_tokens_for_logprob_gpu,
+            dcp_kv_mask=dcp_kv_mask,
         )
         self.buffers.share_buffers()
 
@@ -298,6 +305,11 @@ class EAGLEDraftCudaGraphRunner:
         )
         topk_p = buffers.topk_p[:num_seqs]
         topk_index = buffers.topk_index[:num_seqs]
+        dcp_kv_mask = (
+            buffers.dcp_kv_mask[:num_tokens]
+            if buffers.dcp_kv_mask is not None
+            else None
+        )
 
         if self.require_mlp_tp_gather:
             buffers.global_num_tokens_gpu.copy_(
@@ -375,6 +387,7 @@ class EAGLEDraftCudaGraphRunner:
             global_dp_buffer_len=global_dp_buffer_len,
             spec_algorithm=self.model_runner.spec_algorithm,
             spec_info=spec_info,
+            dcp_kv_mask=dcp_kv_mask,
             capture_hidden_mode=(
                 spec_info.capture_hidden_mode if spec_info else CaptureHiddenMode.NULL
             ),
