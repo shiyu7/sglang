@@ -3,6 +3,8 @@ from __future__ import annotations
 import bisect
 import contextlib
 from dataclasses import dataclass
+import logging
+import os
 from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
@@ -39,6 +41,32 @@ from sglang.srt.utils import (
 
 if TYPE_CHECKING:
     from sglang.srt.speculative.eagle_worker import EAGLEWorker
+
+logger = logging.getLogger(__name__)
+
+
+def _maybe_debug_sync_mtp_draft_replay(
+    device: str,
+    phase: str,
+    forward_batch: Optional[ForwardBatch] = None,
+    raw_bs: Optional[int] = None,
+    bs: Optional[int] = None,
+) -> None:
+    if os.environ.get("SGLANG_DEBUG_MTP_VERIFY_SYNC") != "1":
+        return
+
+    try:
+        torch.get_device_module(device).synchronize()
+    except Exception:
+        logger.exception(
+            "SGLANG_DEBUG_MTP_VERIFY_SYNC failed at phase=%s raw_bs=%s "
+            "bs=%s forward_mode=%s",
+            phase,
+            raw_bs,
+            bs,
+            forward_batch.forward_mode if forward_batch is not None else None,
+        )
+        raise
 
 
 @dataclass
@@ -450,6 +478,13 @@ class EAGLEDraftCudaGraphRunner:
         ):
             buffers.hidden_states[:raw_bs].copy_(forward_batch.spec_info.hidden_states)
         buffers.req_pool_indices[:raw_bs].copy_(forward_batch.req_pool_indices)
+        _maybe_debug_sync_mtp_draft_replay(
+            self.model_runner.device,
+            "after_draft_replay_inputs",
+            forward_batch=forward_batch,
+            raw_bs=raw_bs,
+            bs=bs,
+        )
 
         # TODO(ch-wan): support num_token_non_padded
         if self.require_gathered_buffer:
@@ -472,12 +507,26 @@ class EAGLEDraftCudaGraphRunner:
         self.draft_attn_backend.init_forward_metadata_replay_cuda_graph(
             forward_batch, bs
         )
+        _maybe_debug_sync_mtp_draft_replay(
+            self.model_runner.device,
+            "after_draft_replay_metadata",
+            forward_batch=forward_batch,
+            raw_bs=raw_bs,
+            bs=bs,
+        )
         self.raw_bs = raw_bs
         self.bs = bs
         # TODO: The forward_batch.seq_len_sum might need to be updated to reflect the padding in the cuda graph
 
         # Replay
         self._replay(forward_batch)
+        _maybe_debug_sync_mtp_draft_replay(
+            self.model_runner.device,
+            "after_draft_graph_replay",
+            forward_batch=forward_batch,
+            raw_bs=raw_bs,
+            bs=bs,
+        )
         out = self.output_buffers[bs]
 
         if bs != raw_bs:
