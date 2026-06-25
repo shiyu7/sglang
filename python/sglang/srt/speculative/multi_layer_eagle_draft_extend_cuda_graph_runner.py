@@ -569,6 +569,15 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
 
         if forward_batch.extend_seq_lens_cpu is not None:
             self.extend_seq_lens_cpu[:raw_bs] = forward_batch.extend_seq_lens_cpu
+        else:
+            self.extend_seq_lens_cpu[:raw_bs] = [self.num_tokens_per_bs] * raw_bs
+        if bs > raw_bs:
+            self.extend_seq_lens_cpu[raw_bs:bs] = [self.num_tokens_per_bs] * (
+                bs - raw_bs
+            )
+        forward_batch.spec_info.extend_seq_lens_cpu = list(
+            self.extend_seq_lens_cpu[:bs]
+        )
 
     def replay(self, forward_batch: ForwardBatch, init_state: bool = True):
         assert forward_batch.out_cache_loc is not None
@@ -603,19 +612,30 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
         forward_batch.spec_info.positions = buffers.positions[:num_tokens]
         forward_batch.spec_info.extend_seq_lens_tensor = buffers.extend_seq_lens[:bs]
 
+        # Some attention backends (DSv4) need the original ForwardBatch for
+        # replay-only metadata fields such as out_cache_loc and logical mode.
+        forward_batch.batch_size_before_padding = raw_bs
         self.eagle_worker.draft_extend_attn_backend_list[
             self.step
-        ].init_forward_metadata_replay_cuda_graph(
-            bs=bs,
-            req_pool_indices=buffers.req_pool_indices,
-            seq_lens=buffers.seq_lens,
-            seq_lens_sum=forward_batch.seq_lens_sum
-            + (bs - raw_bs) * self.seq_len_fill_value,
-            encoder_lens=None,
-            forward_mode=self.forward_mode,
-            spec_info=forward_batch.spec_info,
-            seq_lens_cpu=buffers.seq_lens_cpu,
-        )
+        ]._replay_forward_batch = forward_batch
+        try:
+            self.eagle_worker.draft_extend_attn_backend_list[
+                self.step
+            ].init_forward_metadata_replay_cuda_graph(
+                bs=bs,
+                req_pool_indices=buffers.req_pool_indices,
+                seq_lens=buffers.seq_lens,
+                seq_lens_sum=forward_batch.seq_lens_sum
+                + (bs - raw_bs) * self.seq_len_fill_value,
+                encoder_lens=None,
+                forward_mode=self.forward_mode,
+                spec_info=forward_batch.spec_info,
+                seq_lens_cpu=buffers.seq_lens_cpu,
+            )
+        finally:
+            self.eagle_worker.draft_extend_attn_backend_list[
+                self.step
+            ]._replay_forward_batch = None
 
         # Replay
         self.raw_bs = raw_bs
