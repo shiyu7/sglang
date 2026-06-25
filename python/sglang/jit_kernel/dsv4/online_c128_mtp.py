@@ -101,11 +101,12 @@ class OnlineC128MTPController:
             self.clear()
             return 0
 
+        if verify_bs is None and logical_forward_mode.is_target_verify():
+            verify_bs = req_pool_indices.shape[0]
+
         active_req_pool_indices = req_pool_indices
         active_seq_lens = seq_lens
-        if logical_forward_mode.is_target_verify():
-            if verify_bs is None:
-                verify_bs = req_pool_indices.shape[0]
+        if verify_bs is not None:
             active_req_pool_indices = req_pool_indices[:verify_bs]
             active_seq_lens = seq_lens[:verify_bs]
             if verify_bs == 0:

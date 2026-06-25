@@ -1022,6 +1022,7 @@ class DeepseekV4AttnBackend(
                 logical_forward_mode,
                 req_pool_indices,
                 seq_lens,
+                verify_bs=fb.batch_size_before_padding,
             )
             out_cache_loc_padded = torch.nn.functional.pad(
                 out_cache_loc,
@@ -1071,6 +1072,7 @@ class DeepseekV4AttnBackend(
                 logical_forward_mode,
                 req_pool_indices,
                 seq_lens,
+                verify_bs=fb.batch_size_before_padding,
             )
             num_tokens_per_bs = self.draft_extend_num_tokens_per_bs
             num_tokens = num_tokens_per_bs * bs
