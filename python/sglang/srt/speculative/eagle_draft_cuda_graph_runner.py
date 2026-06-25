@@ -54,6 +54,8 @@ def _maybe_debug_sync_mtp_draft_replay(
 ) -> None:
     if os.environ.get("SGLANG_DEBUG_MTP_VERIFY_SYNC") != "1":
         return
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        return
 
     try:
         torch.get_device_module(device).synchronize()
