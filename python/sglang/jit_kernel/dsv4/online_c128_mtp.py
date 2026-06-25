@@ -15,7 +15,7 @@ from sglang.srt.environ import envs
 def _jit_online_c128_mtp_module(head_dim: int) -> Module:
     args = make_cpp_args(head_dim)
     return load_jit(
-        make_name(f"online_c128_mtp_{head_dim}"),
+        make_name(f"online_c128_mtp_guarded_{head_dim}"),
         *args,
         cuda_files=["deepseek_v4/online_c128_mtp.cuh"],
         cuda_wrappers=[
@@ -164,6 +164,7 @@ class OnlineC128MTPController:
             layer_bs,
             num_verify_tokens,
             state_pool.online_mtp_state_slot_offset,
+            token_to_kv_pool.max_num_reqs,
         )
 
     def commit_pending(

@@ -495,8 +495,8 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
         self.online_mtp_max_draft_tokens = online_mtp_max_draft_tokens
         self.online_c128_mtp_pending_seq_lens: Optional[torch.Tensor] = None
         if ONLINE_C128 and envs.SGLANG_EXPERIMENTAL_ONLINE_C128_MTP.get():
-            self.online_c128_mtp_pending_seq_lens = torch.empty(
-                max_num_reqs, dtype=torch.int64, device=device
+            self.online_c128_mtp_pending_seq_lens = torch.full(
+                (max_num_reqs,), -1, dtype=torch.int64, device=device
             )
 
         # Determine this PP stage's absolute layer range
