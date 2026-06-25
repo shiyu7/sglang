@@ -341,6 +341,11 @@ class FrozenKVMTPCudaGraphRunner:
         if bs != raw_bs:
             buffers.seq_lens.fill_(self.seq_len_fill_value)
             buffers.positions.zero_()
+            buffers.mrope_positions.zero_()
+            buffers.topk_p.zero_()
+            buffers.topk_index.zero_()
+            buffers.hidden_states.zero_()
+            buffers.req_pool_indices.zero_()
 
         num_tokens = expanded_bs
         buffers.seq_lens[:raw_expanded_bs].copy_(forward_batch.seq_lens)

@@ -253,6 +253,7 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
             global_num_tokens_for_logprob_gpu=global_num_tokens_for_logprob_gpu,
             dcp_kv_mask=dcp_kv_mask,
         )
+        self.default_extend_start_loc = extend_start_loc.clone()
 
         # Capture
         try:
@@ -760,9 +761,12 @@ class MultiLayerEagleMultiStepDraftExtendCudaGraphRunner:
     def reset_buffers(self, forward_batch, batch_result):
         self.cuda_graph_buffers["input_ids"].zero_()
         self.cuda_graph_buffers["seq_lens"].fill_(self.seq_len_fill_value)
+        self.cuda_graph_buffers["req_pool_indices"].zero_()
         self.cuda_graph_buffers["out_cache_loc"].zero_()
         self.cuda_graph_buffers["swa_out_cache_loc"].zero_()
         self.cuda_graph_buffers["positions"].zero_()
+        self.cuda_graph_buffers["num_correct_drafts"].fill_(1)
+        self.cuda_graph_buffers["num_accept_tokens"].fill_(1)
         # `batch_result.accept_lens` is drafts + bonus.
         bs = forward_batch.batch_size
         self.cuda_graph_buffers["num_correct_drafts"][:bs].copy_(
@@ -773,6 +777,15 @@ class MultiLayerEagleMultiStepDraftExtendCudaGraphRunner:
         )
         if self.cuda_graph_buffers.get("dcp_kv_mask") is not None:
             self.cuda_graph_buffers["dcp_kv_mask"].zero_()
+
+        for runner in self.runners:
+            if runner is None:
+                continue
+            buffers = runner.buffers
+            buffers.mrope_positions.zero_()
+            buffers.hidden_states.zero_()
+            buffers.extend_seq_lens.fill_(runner.num_tokens_per_bs)
+            buffers.extend_start_loc.copy_(runner.default_extend_start_loc)
 
     def get_runner(self, step):
         return self.runners[step]
