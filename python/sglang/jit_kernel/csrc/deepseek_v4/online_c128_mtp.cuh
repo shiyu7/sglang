@@ -12,6 +12,17 @@
 
 namespace {
 
+SGL_DEVICE int64_t map_dcp_c128_state_slot(
+    const int64_t full_loc,
+    const int64_t dcp_world_size,
+    const int64_t dcp_rank) {
+  if (full_loc < 0) return -1;
+  const int64_t logical_slot = full_loc / 128;
+  if (dcp_world_size <= 1) return logical_slot;
+  if (logical_slot % dcp_world_size != dcp_rank) return -1;
+  return logical_slot / dcp_world_size;
+}
+
 SGL_DEVICE int64_t clamp_accept_len(int64_t delta, int64_t max_accept) {
   if (delta < 0) return 0;
   return delta < max_accept ? delta : max_accept;
@@ -33,6 +44,8 @@ struct OnlineC128MTPWritePrefixParams {
   int64_t num_verify_tokens;
   int64_t state_slot_stride;
   int64_t max_num_reqs;
+  int64_t dcp_world_size;
+  int64_t dcp_rank;
 };
 
 template <typename TSeq, typename TReq>
@@ -57,6 +70,8 @@ struct OnlineC128MTPCommitPendingParams {
   int64_t num_verify_tokens;
   int64_t state_slot_stride;
   int64_t max_num_reqs;
+  int64_t dcp_world_size;
+  int64_t dcp_rank;
 };
 
 __global__ void online_c128_mtp_clear_all_pending_kernel(int64_t* pending_seq_lens, int64_t max_num_reqs) {
@@ -99,7 +114,8 @@ __global__ void online_c128_mtp_commit_pending_kernel(
   const int64_t full_loc =
       static_cast<int64_t>(params.req_to_token[req * params.req_to_token_stride_b + chunk_start]);
   if (full_loc < 0) return;
-  const int64_t slot = full_loc / 128;
+  const int64_t slot =
+      map_dcp_c128_state_slot(full_loc, params.dcp_world_size, params.dcp_rank);
   if (slot < 0 || slot >= params.state_slot_stride) return;
   const float* const src = params.state + (slot + accept * params.state_slot_stride) * params.state_stride_b;
   float* const dst = params.state + slot * params.state_stride_b;
@@ -128,7 +144,8 @@ __global__ void online_c128_mtp_write_prefix_kernel(
     const int64_t full_loc =
         static_cast<int64_t>(params.req_to_token[req_idx * params.req_to_token_stride_b + chunk_start]);
     if (full_loc < 0) return;
-    init_slot = full_loc / 128;
+    init_slot =
+        map_dcp_c128_state_slot(full_loc, params.dcp_world_size, params.dcp_rank);
     if (init_slot < 0 || init_slot >= params.state_slot_stride) return;
   }
 
@@ -174,7 +191,8 @@ __global__ void online_c128_mtp_write_prefix_kernel(
         const int64_t full_loc =
             static_cast<int64_t>(params.req_to_token[req_idx * params.req_to_token_stride_b + chunk_start]);
         if (full_loc < 0) continue;
-        const int64_t base_slot = full_loc / 128;
+        const int64_t base_slot =
+            map_dcp_c128_state_slot(full_loc, params.dcp_world_size, params.dcp_rank);
         if (base_slot < 0 || base_slot >= params.state_slot_stride) continue;
         const int64_t slot = base_slot + (step + 1) * params.state_slot_stride;
         float* const out = params.state + slot * params.state_stride_b;
@@ -206,6 +224,8 @@ struct OnlineC128MTPWritePrefixKernel {
       int64_t num_verify_tokens,
       int64_t state_slot_stride,
       int64_t max_num_reqs,
+      int64_t dcp_world_size,
+      int64_t dcp_rank,
       DLDevice device) {
     using namespace host;
 
@@ -224,6 +244,8 @@ struct OnlineC128MTPWritePrefixKernel {
         .num_verify_tokens = num_verify_tokens,
         .state_slot_stride = state_slot_stride,
         .max_num_reqs = max_num_reqs,
+        .dcp_world_size = dcp_world_size,
+        .dcp_rank = dcp_rank,
     };
 
     constexpr uint32_t kThreads = 256;
@@ -241,7 +263,9 @@ struct OnlineC128MTPWritePrefixKernel {
       int64_t layer_bs,
       int64_t num_verify_tokens,
       int64_t state_slot_stride,
-      int64_t max_num_reqs) {
+      int64_t max_num_reqs,
+      int64_t dcp_world_size,
+      int64_t dcp_rank) {
     using namespace host;
 
     auto seq_dtype = SymbolicDType{};
@@ -264,6 +288,8 @@ struct OnlineC128MTPWritePrefixKernel {
     RuntimeCheck(layer_bs * num_verify_tokens <= kv_score_input.shape()[0], "kv_score_input is too small");
     RuntimeCheck(max_num_reqs > 0, "max_num_reqs must be positive");
     RuntimeCheck(max_num_reqs <= req_to_token.shape()[0], "max_num_reqs exceeds req_to_token rows");
+    RuntimeCheck(dcp_world_size >= 1);
+    RuntimeCheck(dcp_rank >= 0 && dcp_rank < dcp_world_size);
     RuntimeCheck(
         state_slot_stride * (num_verify_tokens + 1) <= state.shape()[0],
         "state buffer is too small for online MTP slots");
@@ -272,21 +298,25 @@ struct OnlineC128MTPWritePrefixKernel {
       if (req_dtype.is_type<int32_t>()) {
         launch<int32_t, int32_t>(
             kv_score_input, seq_lens, req_pool_indices, req_to_token, ape, state,
-            layer_bs, num_verify_tokens, state_slot_stride, max_num_reqs, device.unwrap());
+            layer_bs, num_verify_tokens, state_slot_stride, max_num_reqs,
+            dcp_world_size, dcp_rank, device.unwrap());
       } else {
         launch<int32_t, int64_t>(
             kv_score_input, seq_lens, req_pool_indices, req_to_token, ape, state,
-            layer_bs, num_verify_tokens, state_slot_stride, max_num_reqs, device.unwrap());
+            layer_bs, num_verify_tokens, state_slot_stride, max_num_reqs,
+            dcp_world_size, dcp_rank, device.unwrap());
       }
     } else {
       if (req_dtype.is_type<int32_t>()) {
         launch<int64_t, int32_t>(
             kv_score_input, seq_lens, req_pool_indices, req_to_token, ape, state,
-            layer_bs, num_verify_tokens, state_slot_stride, max_num_reqs, device.unwrap());
+            layer_bs, num_verify_tokens, state_slot_stride, max_num_reqs,
+            dcp_world_size, dcp_rank, device.unwrap());
       } else {
         launch<int64_t, int64_t>(
             kv_score_input, seq_lens, req_pool_indices, req_to_token, ape, state,
-            layer_bs, num_verify_tokens, state_slot_stride, max_num_reqs, device.unwrap());
+            layer_bs, num_verify_tokens, state_slot_stride, max_num_reqs,
+            dcp_world_size, dcp_rank, device.unwrap());
       }
     }
   }
@@ -370,6 +400,8 @@ struct OnlineC128MTPCommitPendingKernel {
       int64_t num_verify_tokens,
       int64_t state_slot_stride,
       int64_t max_num_reqs,
+      int64_t dcp_world_size,
+      int64_t dcp_rank,
       DLDevice device) {
     using namespace host;
 
@@ -385,6 +417,8 @@ struct OnlineC128MTPCommitPendingKernel {
         .num_verify_tokens = num_verify_tokens,
         .state_slot_stride = state_slot_stride,
         .max_num_reqs = max_num_reqs,
+        .dcp_world_size = dcp_world_size,
+        .dcp_rank = dcp_rank,
     };
 
     constexpr uint32_t kThreads = 256;
@@ -401,7 +435,9 @@ struct OnlineC128MTPCommitPendingKernel {
       int64_t cur_bs,
       int64_t num_verify_tokens,
       int64_t state_slot_stride,
-      int64_t max_num_reqs) {
+      int64_t max_num_reqs,
+      int64_t dcp_world_size,
+      int64_t dcp_rank) {
     using namespace host;
 
     auto seq_dtype = SymbolicDType{};
@@ -422,6 +458,8 @@ struct OnlineC128MTPCommitPendingKernel {
     RuntimeCheck(cur_bs <= cur_req_pool_indices.shape()[0], "cur_bs exceeds req rows");
     RuntimeCheck(max_num_reqs <= pending_seq_lens.shape()[0], "max_num_reqs exceeds pending rows");
     RuntimeCheck(max_num_reqs <= req_to_token.shape()[0], "max_num_reqs exceeds req_to_token rows");
+    RuntimeCheck(dcp_world_size >= 1);
+    RuntimeCheck(dcp_rank >= 0 && dcp_rank < dcp_world_size);
     RuntimeCheck(
         state_slot_stride * (num_verify_tokens + 1) <= state.shape()[0],
         "state buffer is too small for online MTP slots");
@@ -430,21 +468,25 @@ struct OnlineC128MTPCommitPendingKernel {
       if (req_dtype.is_type<int32_t>()) {
         launch<int32_t, int32_t>(
             cur_seq_lens, cur_req_pool_indices, req_to_token, pending_seq_lens,
-            state, cur_bs, num_verify_tokens, state_slot_stride, max_num_reqs, device.unwrap());
+            state, cur_bs, num_verify_tokens, state_slot_stride, max_num_reqs,
+            dcp_world_size, dcp_rank, device.unwrap());
       } else {
         launch<int32_t, int64_t>(
             cur_seq_lens, cur_req_pool_indices, req_to_token, pending_seq_lens,
-            state, cur_bs, num_verify_tokens, state_slot_stride, max_num_reqs, device.unwrap());
+            state, cur_bs, num_verify_tokens, state_slot_stride, max_num_reqs,
+            dcp_world_size, dcp_rank, device.unwrap());
       }
     } else {
       if (req_dtype.is_type<int32_t>()) {
         launch<int64_t, int32_t>(
             cur_seq_lens, cur_req_pool_indices, req_to_token, pending_seq_lens,
-            state, cur_bs, num_verify_tokens, state_slot_stride, max_num_reqs, device.unwrap());
+            state, cur_bs, num_verify_tokens, state_slot_stride, max_num_reqs,
+            dcp_world_size, dcp_rank, device.unwrap());
       } else {
         launch<int64_t, int64_t>(
             cur_seq_lens, cur_req_pool_indices, req_to_token, pending_seq_lens,
-            state, cur_bs, num_verify_tokens, state_slot_stride, max_num_reqs, device.unwrap());
+            state, cur_bs, num_verify_tokens, state_slot_stride, max_num_reqs,
+            dcp_world_size, dcp_rank, device.unwrap());
       }
     }
   }

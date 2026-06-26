@@ -11,6 +11,18 @@ from sglang.jit_kernel.utils import cache_once, load_jit, make_cpp_args
 from sglang.srt.environ import envs
 
 
+def _get_dcp_world_rank() -> tuple[int, int]:
+    try:
+        from sglang.srt.distributed.parallel_state import get_dcp_group_no_assert
+
+        group = get_dcp_group_no_assert()
+        if group is not None and group.world_size > 1:
+            return int(group.world_size), int(group.rank_in_group)
+    except Exception:
+        pass
+    return 1, 0
+
+
 @cache_once
 def _jit_online_c128_mtp_module(head_dim: int) -> Module:
     args = make_cpp_args(head_dim)
@@ -155,6 +167,7 @@ class OnlineC128MTPController:
         if layer_bs <= 0:
             return
 
+        dcp_world_size, dcp_rank = _get_dcp_world_rank()
         _jit_online_c128_mtp_module(head_dim).write_prefix_states(
             kv_score_input,
             ctx.seq_lens,
@@ -166,6 +179,8 @@ class OnlineC128MTPController:
             num_verify_tokens,
             state_pool.online_mtp_state_slot_offset,
             token_to_kv_pool.max_num_reqs,
+            dcp_world_size,
+            dcp_rank,
         )
 
     def commit_pending(
@@ -190,6 +205,7 @@ class OnlineC128MTPController:
         token_to_kv_pool = backend.token_to_kv_pool
         pending_seq_lens = token_to_kv_pool.get_online_c128_mtp_pending_seq_lens()
         cur_bs = min(seq_lens.shape[0], req_pool_indices.shape[0])
+        dcp_world_size, dcp_rank = _get_dcp_world_rank()
 
         for runtime in self._iter_layer_runtimes():
             _jit_online_c128_mtp_module(runtime.head_dim).commit_pending(
@@ -202,6 +218,8 @@ class OnlineC128MTPController:
                 num_verify_tokens,
                 runtime.state_slot_offset,
                 token_to_kv_pool.max_num_reqs,
+                dcp_world_size,
+                dcp_rank,
             )
 
         self.clear()

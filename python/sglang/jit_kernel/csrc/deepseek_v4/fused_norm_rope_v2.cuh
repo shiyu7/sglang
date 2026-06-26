@@ -84,6 +84,7 @@ INDEXER_KERNEL void fused_norm_rope_indexer(const __grid_constant__ FusedNormRop
     out_loc = params.out_loc[plan.ragged_id];
   } else if constexpr (kMode == CompressDecode) {
     const auto plan = static_cast<const PlanD*>(params.handle)[work_id];
+    if (plan.write_loc < 0 || plan.read_page_0 < 0) return;
     if (plan.seq_len % params.compress_ratio != 0) return;
     position = plan.seq_len - params.compress_ratio;
     out_loc = params.out_loc[work_id];
@@ -241,6 +242,7 @@ FLASHMLA_KERNEL void fused_norm_rope_flashmla(const __grid_constant__ FusedNormR
     out_loc = params.out_loc[plan.ragged_id];
   } else if constexpr (kMode == CompressDecode) {
     const auto plan = static_cast<const PlanD*>(params.handle)[work_id];
+    if (plan.write_loc < 0 || plan.read_page_0 < 0) return;
     if (plan.seq_len % params.compress_ratio != 0) return;
     position = plan.seq_len - params.compress_ratio;
     out_loc = params.out_loc[work_id];

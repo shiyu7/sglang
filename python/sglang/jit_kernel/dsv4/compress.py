@@ -15,6 +15,18 @@ from sglang.jit_kernel.utils import (
 from .utils import make_name
 
 
+def _get_dcp_world_rank() -> tuple[int, int]:
+    try:
+        from sglang.srt.distributed.parallel_state import get_dcp_group_no_assert
+
+        group = get_dcp_group_no_assert()
+        if group is not None and group.world_size > 1:
+            return int(group.world_size), int(group.rank_in_group)
+    except Exception:
+        pass
+    return 1, 0
+
+
 @cache_once
 def _jit_compress_norm_rope_module(
     dtype: torch.dtype,
@@ -151,6 +163,7 @@ class CompressorDecodePlan(NamedTuple):
     ) -> CompressorDecodePlan:
         batch_size = int(seq_lens.shape[0])
         module = _jit_compress_128_online_module(512)
+        dcp_world_size, dcp_rank = _get_dcp_world_rank()
         plan_d = torch.empty(
             (batch_size, 16),
             dtype=torch.uint8,
@@ -162,6 +175,8 @@ class CompressorDecodePlan(NamedTuple):
             req_to_token,
             plan_d,
             int(state_slot_offset),
+            int(dcp_world_size),
+            int(dcp_rank),
         )
         return CompressorDecodePlan(128, plan_d)
 
@@ -276,6 +291,7 @@ class CompressorPrefillPlan(NamedTuple):
         plan_c_dev = torch.empty((num_q_tokens, 16), dtype=torch.uint8, device=device)
         plan_w_dev = torch.empty((num_q_tokens, 16), dtype=torch.uint8, device=device)
         module = _jit_compress_128_online_module(512)  # NOTE: only support dim=512
+        dcp_world_size, dcp_rank = _get_dcp_world_rank()
         num_c, num_w = module.plan_prefill(
             seq_lens_cpu,
             extend_lens_cpu,
@@ -287,6 +303,8 @@ class CompressorPrefillPlan(NamedTuple):
             plan_w_dev,
             int(state_slot_offset),
             bool(use_cuda_graph),
+            int(dcp_world_size),
+            int(dcp_rank),
         )
         return CompressorPrefillPlan(
             128,
