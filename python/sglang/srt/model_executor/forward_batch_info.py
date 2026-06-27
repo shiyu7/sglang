@@ -451,6 +451,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # only when ``model_runner.dcp_size > 1``; ``None`` otherwise.
     dcp_kv_mask: Optional[torch.Tensor] = None
 
+    # Debug-only escape hatch for isolating CUDA graph issues on a specific
+    # forward without changing its semantic forward mode.
+    disable_cuda_graph_for_debug: bool = False
+
     @classmethod
     def init_new(
         cls,

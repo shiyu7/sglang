@@ -775,8 +775,6 @@ class MultiLayerEagleWorkerV2(BaseSpecWorker):
             accept_index,
         ) = verify_input.sample(batch, logits_output)
         new_seq_lens = batch.seq_lens + accept_lens
-        verify_done = torch.get_device_module(self.device).Event()
-        verify_done.record()
 
         if not batch.forward_mode.is_idle():
             accept_tokens = predict[accept_index]
@@ -794,6 +792,9 @@ class MultiLayerEagleWorkerV2(BaseSpecWorker):
             compute_spec_v2_logprobs(
                 batch, logits_output, predict, accept_index, self.speculative_num_steps
             )
+
+        verify_done = torch.get_device_module(self.device).Event()
+        verify_done.record()
 
         next_draft_input = EagleDraftInput(
             bonus_tokens=bonus_tokens,

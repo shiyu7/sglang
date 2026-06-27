@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import os
 from typing import TYPE_CHECKING, List, Literal, Optional, TypeAlias, Union, cast
 
 import torch
@@ -19,6 +21,8 @@ if TYPE_CHECKING:
     from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
+logger = logging.getLogger(__name__)
+
 
 CompressMetadata: TypeAlias = Union[CompressorDecodePlan, CompressorPrefillPlan]
 # NOTE: alias for backward compatibility
@@ -28,6 +32,37 @@ FusedCompressMetadata: TypeAlias = CompressMetadata
 def _use_online_compress(compress_ratio: int) -> bool:
     """Online state-pool path is c128-only."""
     return compress_ratio == 128 and envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get()
+
+
+def _maybe_debug_sync_target_verify(
+    *,
+    forward_batch: ForwardBatch,
+    layer_id: int,
+    compress_ratio: int,
+    phase: str,
+    kv_score_input: Optional[torch.Tensor] = None,
+    plan: Optional[CompressMetadata] = None,
+) -> None:
+    if os.environ.get("SGLANG_DEBUG_DSV4_TARGET_VERIFY_SYNC") != "1":
+        return
+    if not forward_batch.forward_mode.is_target_verify():
+        return
+    if torch.cuda.is_current_stream_capturing():
+        return
+
+    try:
+        torch.cuda.synchronize()
+    except Exception:
+        logger.exception(
+            "SGLANG_DEBUG_DSV4_TARGET_VERIFY_SYNC failed at phase=%s "
+            "layer=%s ratio=%s kv_score_shape=%s plan_shapes=%s",
+            phase,
+            layer_id,
+            compress_ratio,
+            tuple(kv_score_input.shape) if kv_score_input is not None else None,
+            [tuple(x.shape) for x in plan[1:]] if plan is not None else None,
+        )
+        raise
 
 
 class CompressorBackendMixin:
@@ -128,6 +163,14 @@ class CompressorBackendMixin:
             compress_ratio=compressor.ratio,
             page_size=page_size,
         )
+        _maybe_debug_sync_target_verify(
+            forward_batch=forward_batch,
+            layer_id=layer_id,
+            compress_ratio=compressor.ratio,
+            phase="after_forward_compress_all_in_one",
+            kv_score_input=kv_score_input,
+            plan=self._get_paged_compress_metadata(compressor.ratio),
+        )
         online_c128_mtp = getattr(self, "online_c128_mtp", None)
         if online_c128_mtp is not None:
             online_c128_mtp.write_prefix_states(
@@ -137,6 +180,14 @@ class CompressorBackendMixin:
                 logical_forward_mode=getattr(
                     forward_batch, "_original_forward_mode", forward_batch.forward_mode
                 ),
+            )
+            _maybe_debug_sync_target_verify(
+                forward_batch=forward_batch,
+                layer_id=layer_id,
+                compress_ratio=compressor.ratio,
+                phase="after_online_c128_mtp_write_prefix_states",
+                kv_score_input=kv_score_input,
+                plan=self._get_paged_compress_metadata(compressor.ratio),
             )
 
     # NOTE: alias for backward compatibility
@@ -162,6 +213,7 @@ def create_paged_compressor_data(
     use_prefill_cuda_graph: bool = False,
     num_q_tokens: Optional[int] = None,
     online_state_slot_offset: int = 0,
+    online_active_bs: Optional[int] = None,
 ) -> CompressMetadata:
     """Build the paged compress metadata (= the plan).
 
@@ -181,6 +233,7 @@ def create_paged_compressor_data(
             use_prefill_cuda_graph=use_prefill_cuda_graph,
             num_q_tokens=num_q_tokens,
             online_state_slot_offset=online_state_slot_offset,
+            online_active_bs=online_active_bs,
         )
 
     swa_page_size = token_to_kv_pool.swa_page_size
@@ -239,6 +292,7 @@ def _create_online_paged_compressor_data(
     use_prefill_cuda_graph: bool,
     num_q_tokens: Optional[int],
     online_state_slot_offset: int = 0,
+    online_active_bs: Optional[int] = None,
 ) -> CompressMetadata:
     req_pool_indices = req_pool_indices.to(torch.int64)
 
@@ -265,6 +319,7 @@ def _create_online_paged_compressor_data(
             num_q_tokens=int(num_q_tokens_planner),
             use_cuda_graph=use_prefill_cuda_graph,
             state_slot_offset=online_state_slot_offset,
+            active_bs=online_active_bs,
         )
     else:
         return CompressorDecodePlan.generate_online(

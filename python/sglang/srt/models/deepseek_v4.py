@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
 from typing import (
     TYPE_CHECKING,
     Iterable,
@@ -103,6 +104,30 @@ from sglang.srt.utils import (
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
 logger = logging.getLogger(__name__)
+
+
+def _maybe_debug_sync_dsv4_model(forward_batch: ForwardBatch, phase: str) -> None:
+    if os.environ.get("SGLANG_DEBUG_DSV4_MODEL_SYNC") != "1":
+        return
+    forward_mode = getattr(
+        forward_batch, "_original_forward_mode", forward_batch.forward_mode
+    )
+    if not forward_mode.is_target_verify():
+        return
+    if torch.cuda.is_current_stream_capturing():
+        return
+
+    try:
+        torch.cuda.synchronize()
+    except Exception:
+        logger.exception(
+            "SGLANG_DEBUG_DSV4_MODEL_SYNC failed at phase=%s "
+            "bs=%s forward_mode=%s",
+            phase,
+            forward_batch.batch_size_before_padding,
+            forward_mode,
+        )
+        raise
 
 _FP8_WO_A_GEMM = envs.SGLANG_OPT_FP8_WO_A_GEMM.get()
 
@@ -1104,6 +1129,7 @@ class DeepseekV4Model(nn.Module):
                 input_ids=input_ids,
                 input_ids_global=input_ids_global,
             )
+            _maybe_debug_sync_dsv4_model(forward_batch, f"after_layer_{i}")
 
         # CP all-gather only on the last PP rank; PP IPC carries CP-split tensors.
         if self.pp_group.is_last_rank and nsa_use_prefill_cp(forward_batch):
@@ -1123,7 +1149,9 @@ class DeepseekV4Model(nn.Module):
         hidden_states = self.hc_head(
             hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base
         )
+        _maybe_debug_sync_dsv4_model(forward_batch, "after_hc_head")
         hidden_states = self.norm(hidden_states)
+        _maybe_debug_sync_dsv4_model(forward_batch, "after_final_norm")
 
         return hidden_states, pre_hc_head
 
@@ -1229,6 +1257,7 @@ class DeepseekV4ForCausalLM(nn.Module):
             hidden_states = self.model.forward(
                 input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
             )
+        _maybe_debug_sync_dsv4_model(forward_batch, "after_model_forward")
         if not self.pp_group.is_last_rank:
             return hidden_states
 
@@ -1236,7 +1265,8 @@ class DeepseekV4ForCausalLM(nn.Module):
         if self.capture_aux_hidden_states:
             hidden_states, aux_hidden_states = hidden_states
         hidden_states, pre_hc_head = hidden_states
-        return self.logits_processor(
+        _maybe_debug_sync_dsv4_model(forward_batch, "before_logits_processor")
+        output = self.logits_processor(
             input_ids,
             hidden_states,
             self.lm_head,
@@ -1244,6 +1274,8 @@ class DeepseekV4ForCausalLM(nn.Module):
             aux_hidden_states,
             hidden_states_before_norm=pre_hc_head,
         )
+        _maybe_debug_sync_dsv4_model(forward_batch, "after_logits_processor")
+        return output
 
     def _setup_fp8_wo_a_scales(self, is_nextn: bool) -> None:
         from deep_gemm import transform_sf_into_required_layout

@@ -1137,15 +1137,6 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 batch, verify_input, accept_lens, accept_index, bs
             )
 
-        verify_done = torch.get_device_module(self.device).Event()
-        verify_done.record()
-        _maybe_debug_sync_mtp_verify(
-            self.device,
-            "after_verify_done_record",
-            batch=batch,
-            can_run_cuda_graph=can_run_cuda_graph,
-        )
-
         if not batch.forward_mode.is_idle():
             accept_tokens = predict[accept_index]
             bonus_tokens = torch.empty_like(accept_lens, dtype=torch.int32)
@@ -1174,6 +1165,15 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 batch=batch,
                 can_run_cuda_graph=can_run_cuda_graph,
             )
+
+        verify_done = torch.get_device_module(self.device).Event()
+        verify_done.record()
+        _maybe_debug_sync_mtp_verify(
+            self.device,
+            "after_verify_done_record",
+            batch=batch,
+            can_run_cuda_graph=can_run_cuda_graph,
+        )
 
         next_draft_input = EagleDraftInput(
             bonus_tokens=bonus_tokens,

@@ -709,6 +709,7 @@ struct OnlinePrefillStage1Params {
   int32_t state_slot_offset;
   int32_t dcp_world_size;
   int32_t dcp_rank;
+  uint32_t active_bs;
   uint32_t num_c;
   uint32_t num_w;
 };
@@ -723,6 +724,10 @@ __global__ void plan_c128_online_prefill_kernel(const OnlinePrefillStage1Params 
   auto plan = *plan_ptr;
   if (plan.is_invalid()) return;
   const auto batch_id = plan.read_page_0;
+  if (batch_id >= params.active_bs) {
+    *plan_ptr = CompressPlan::invalid();
+    return;
+  }
   const auto rid = params.req_pool_indices[batch_id];
   const int32_t position = static_cast<int32_t>(plan.seq_len - 1u);
   const int32_t chunk_start = (position / 128) * 128;
@@ -752,7 +757,8 @@ inline OnlinePrefillPlan plan_online_prefill(
     const int32_t state_slot_offset,
     const bool use_cuda_graph,
     const int32_t dcp_world_size,
-    const int32_t dcp_rank) {
+    const int32_t dcp_rank,
+    const int32_t active_bs) {
   auto B = SymbolicSize{"batch_size"};
   auto N = SymbolicSize{"num_q_tokens"};
   auto cpu = SymbolicDevice{};
@@ -786,6 +792,8 @@ inline OnlinePrefillPlan plan_online_prefill(
   RuntimeCheck(state_slot_offset >= 0);
   RuntimeCheck(dcp_world_size >= 1);
   RuntimeCheck(dcp_rank >= 0 && dcp_rank < dcp_world_size);
+  RuntimeCheck(active_bs >= 0);
+  RuntimeCheck(active_bs <= B.unwrap());
 
   const auto stage0_params = OnlinePrefillStage0Params{
       .plan_c = static_cast<CompressPlan*>(plan_c_pin.data_ptr()),
@@ -908,6 +916,7 @@ inline OnlinePrefillPlan plan_online_prefill(
         .state_slot_offset = state_slot_offset,
         .dcp_world_size = dcp_world_size,
         .dcp_rank = dcp_rank,
+        .active_bs = static_cast<uint32_t>(active_bs),
         .num_c = num_c_padded,
         .num_w = num_w_padded,
     };

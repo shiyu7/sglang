@@ -292,9 +292,9 @@ class EagleVerifyInputV2Mixin:
         batch: ScheduleBatch,
         target_worker: TpModelWorker,
     ):
+        bs = len(batch.req_pool_indices)
         if not batch.forward_mode.is_idle():
             # Assign cache locations
-            bs = len(batch.req_pool_indices)
             batch.input_ids = self.draft_token
             device = batch.input_ids.device
             batch.out_cache_loc = assign_extend_cache_locs_func(
@@ -346,6 +346,25 @@ class EagleVerifyInputV2Mixin:
             target_worker.model_runner.graph_runner
             and target_worker.model_runner.graph_runner.can_run(verify_forward_batch)
         )
+        if (
+            can_run_cuda_graph
+            and os.environ.get("SGLANG_DEBUG_DISABLE_TARGET_VERIFY_CUDA_GRAPH") == "1"
+            and bs
+            >= int(
+                os.environ.get(
+                    "SGLANG_DEBUG_DISABLE_TARGET_VERIFY_CUDA_GRAPH_MIN_BS", "0"
+                )
+                or "0"
+            )
+        ):
+            logger.warning(
+                "SGLANG_DEBUG_DISABLE_TARGET_VERIFY_CUDA_GRAPH=1: "
+                "forcing target verify forward to eager mode at bs=%s",
+                bs,
+            )
+            verify_forward_batch.disable_cuda_graph_for_debug = True
+            can_run_cuda_graph = False
+
         if can_run_cuda_graph:
             target_worker.model_runner.graph_runner.replay_prepare(verify_forward_batch)
             _maybe_debug_sync_mtp_verify_prepare(

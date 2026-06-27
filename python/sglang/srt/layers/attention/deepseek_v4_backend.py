@@ -237,18 +237,10 @@ class DSV4AttnMetadata:
         compacted = torch.where(
             compact_mask, compacted, torch.full_like(compacted, -1)
         )
-        # FlashMLA's sm90 sparse_fp8 MODEL1 kernel handles topk_length=0
-        # correctly: its mainloop forces ``orig_topk_padded >= TOPK_BLOCK_SIZE``
-        # but masks every column via ``rel_block_idx*TOPK_BLOCK_SIZE + col <
-        # topk_length`` and ``index != -1``, so all logits become -inf, rL
-        # collapses to 0, ``o_scales`` is forced to 0 and the kernel writes
-        # ``o=0, lse=+inf`` -- exactly the "no contribution" signal the DCP
-        # merge expects (``cp_lse_ag_out_rs`` already maps +inf/NaN to -inf).
-        # Leaving the empty-row indices at -1 keeps that path active. We
-        # used to substitute a dummy ``index=0`` here, which combined with
-        # the caller's ``clamp(swa_topk_lengths, min=1)`` made FlashMLA
-        # treat the row as if it had 1 valid KV (page 0 / token 0) and
-        # poisoned the cross-rank LSE merge.
+        # Keep empty-row indices at -1 so FlashMLA masks them out, but avoid
+        # passing topk_length=0 to the graph-captured scheduler path. A dummy
+        # ``index=0`` would pollute rows where SWA is empty but an extra source
+        # is present; ``length=1,index=-1`` preserves the "no local KV" signal.
         return compacted.to(torch.int32), local_lengths
 
     def apply_dcp_local_kv_indices(self) -> None:
@@ -263,11 +255,7 @@ class DSV4AttnMetadata:
             )
         )
         self.dcp_swa_has_local_kv = swa_local_lengths > 0
-        # Do not clamp swa lengths to 1: FlashMLA correctly emits
-        # ``o=0, lse=+inf`` for topk_length=0 rows (see the comment in
-        # ``_compact_dcp_local_indices``); a clamp would force a dummy KV
-        # into the row's softmax and pollute the cross-rank LSE merge.
-        self.swa_topk_lengths = swa_local_lengths
+        self.swa_topk_lengths = torch.clamp(swa_local_lengths, min=1)
         if self.c128_page_indices is not None:
             self.c128_page_indices, c128_local_lengths = (
                 self._compact_dcp_local_indices(
@@ -276,9 +264,9 @@ class DSV4AttnMetadata:
             )
             self.dcp_c128_has_local_kv = c128_local_lengths > 0
             # Extra KV sources may be empty while SWA still has local KV for
-            # this row. Do not clamp extra lengths to 1, otherwise the dummy
-            # index participates in FlashMLA and pollutes DCP LSE merging.
-            self.c128_topk_lengths_clamp1 = c128_local_lengths
+            # this row. Clamp only the length; empty rows retain index -1, so
+            # FlashMLA masks them instead of attending to a dummy KV.
+            self.c128_topk_lengths_clamp1 = torch.clamp(c128_local_lengths, min=1)
         # Backward-compatible alias for existing metadata copy/replay paths.
         # Forward must use the compress-ratio-specific mask below instead.
         self.dcp_has_local_kv = self.dcp_swa_has_local_kv
@@ -490,6 +478,13 @@ class DeepseekV4AttnBackend(
             DSV4RawDecodeMetadata,
         ] = None
         self._replay_forward_batch: Optional[ForwardBatch] = None  # FIXME: out-of-band
+        self._current_capture_raw: Optional[
+            Union[DSV4RawVerifyMetadata, DSV4RawDecodeMetadata]
+        ] = None
+        self._current_capture_bucket_bs: Optional[Tuple[_GraphBucket, int]] = None
+        self._cuda_graph_captured_full_metadata: Dict[
+            _GraphBucket, Dict[int, DSV4Metadata]
+        ] = {bucket: {} for bucket in _GraphBucket}
         self.online_c128_mtp = OnlineC128MTPController(self)
 
     def _move_to_device(self, x: List[int]) -> torch.Tensor:
@@ -513,6 +508,7 @@ class DeepseekV4AttnBackend(
         extend_seq_lens: torch.Tensor,
         use_prefill_cuda_graph: bool,
         online_c128_state_slot_offset: int,
+        online_c128_active_bs: Optional[int] = None,
     ) -> Optional[FusedCompressMetadata]:
         if not self.online_c128_mtp.enabled():
             return None
@@ -530,6 +526,7 @@ class DeepseekV4AttnBackend(
             extend_lens_cpu=extend_lens_cpu,
             use_prefill_cuda_graph=use_prefill_cuda_graph,
             online_state_slot_offset=online_c128_state_slot_offset,
+            online_active_bs=online_c128_active_bs,
         )
 
     def init_forward_metadata_indexer(self, core_attn_metadata: DSV4AttnMetadata):
@@ -651,6 +648,7 @@ class DeepseekV4AttnBackend(
         out_cache_loc: Optional[torch.Tensor] = None,
         use_prefill_cuda_graph: bool = False,
         online_c128_state_slot_offset: int = 0,
+        online_c128_active_bs: Optional[int] = None,
     ) -> Union[DSV4Metadata, DSV4RawVerifyMetadata]:
         if envs.SGLANG_PREP_IN_CUDA_GRAPH.get():
             assert out_cache_loc is not None
@@ -678,6 +676,7 @@ class DeepseekV4AttnBackend(
                     extend_seq_lens,
                     use_prefill_cuda_graph,
                     online_c128_state_slot_offset,
+                    online_c128_active_bs,
                 ),
             )
         else:
@@ -944,10 +943,42 @@ class DeepseekV4AttnBackend(
             raw_type = DSV4RawDecodeMetadata
         elif bucket == _GraphBucket.TARGET_VERIFY:
             out_cache_loc = torch.zeros(num_tokens, **self.cuda_int32_kwargs)
+            metadata_seq_lens = seq_lens
+            metadata_seq_lens_cpu = None
+            if envs.SGLANG_PREP_IN_CUDA_GRAPH.get():
+                capture_seq_len = int(
+                    os.environ.get(
+                        "SGLANG_DSV4_TARGET_VERIFY_CUDA_GRAPH_CAPTURE_SEQ_LEN",
+                        "0",
+                    )
+                    or "0"
+                )
+                if capture_seq_len <= 0:
+                    capture_seq_len = (
+                        self.MAX_SEQ_LEN_FOR_CAPTURE
+                        - self.speculative_num_draft_tokens
+                    )
+                capture_seq_len = max(
+                    1,
+                    min(
+                        capture_seq_len,
+                        self.MAX_SEQ_LEN_FOR_CAPTURE
+                        - self.speculative_num_draft_tokens,
+                    ),
+                )
+                # FlashMLA initializes its graph-captured scheduler metadata on
+                # the first call. Capture target-verify with a large metadata
+                # sequence length so replay can safely copy shorter real
+                # lengths into the captured tensor buffers.
+                metadata_seq_lens = torch.full_like(seq_lens, capture_seq_len)
+                metadata_seq_lens_cpu = torch.full(
+                    (bs,), capture_seq_len, dtype=torch.int64
+                )
             metadata = self.init_forward_metadata_target_verify(
                 max_seq_len=self.MAX_SEQ_LEN_FOR_CAPTURE,
                 req_pool_indices=req_pool_indices,
-                seq_lens=seq_lens,
+                seq_lens=metadata_seq_lens,
+                seq_lens_cpu=metadata_seq_lens_cpu,
                 out_cache_loc=out_cache_loc,
                 use_prefill_cuda_graph=True,
             )
@@ -967,10 +998,13 @@ class DeepseekV4AttnBackend(
 
         self.cuda_graph_metadata_of_bucket_and_bs[bucket][bs] = metadata
         self.forward_metadata = metadata
+        self._current_capture_bucket_bs = (bucket, bs)
         if raw_type is not None:
             self._current_capture_raw = (
                 metadata if isinstance(metadata, raw_type) else None
             )
+        else:
+            self._current_capture_raw = None
 
     def init_forward_metadata_replay_cuda_graph(
         self,
@@ -1070,6 +1104,7 @@ class DeepseekV4AttnBackend(
                 out_cache_loc=out_cache_loc_padded,
                 use_prefill_cuda_graph=True,
                 online_c128_state_slot_offset=online_c128_state_slot_offset,
+                online_c128_active_bs=verify_bs,
             )
         elif bucket == _GraphBucket.DRAFT_EXTEND:
             self.online_c128_mtp.prepare_forward(
@@ -1126,6 +1161,26 @@ class DeepseekV4AttnBackend(
             self.forward_metadata = temp_metadata
             return
         chosen_metadata.copy_(temp_metadata)
+        captured_full_metadata = self._cuda_graph_captured_full_metadata[bucket].get(
+            bs
+        )
+        if captured_full_metadata is not None:
+            if isinstance(temp_metadata, DSV4Metadata):
+                temp_full_metadata = temp_metadata
+            elif isinstance(temp_metadata, DSV4RawVerifyMetadata):
+                temp_full_metadata = self.make_forward_metadata_from_raw_verify(
+                    raw_metadata=temp_metadata,
+                    online_c128_state_slot_offset=(
+                        self.online_c128_mtp.state_slot_offset()
+                    ),
+                )
+            elif isinstance(temp_metadata, DSV4RawDecodeMetadata):
+                temp_full_metadata = self.make_forward_metadata_from_raw_decode(
+                    raw_metadata=temp_metadata,
+                )
+            else:
+                raise TypeError(f"unexpected {type(temp_metadata)=}")
+            captured_full_metadata.copy_(temp_full_metadata)
         self.forward_metadata = chosen_metadata
 
     def get_cuda_graph_seq_len_fill_value(self):
@@ -1146,6 +1201,26 @@ class DeepseekV4AttnBackend(
         current_raw = getattr(self, "_current_capture_raw", None)
         if current_raw is not None:
             self.forward_metadata = current_raw
+
+    def on_after_cuda_graph_capture(self):
+        capture_key = getattr(self, "_current_capture_bucket_bs", None)
+        current_raw = getattr(self, "_current_capture_raw", None)
+        if (
+            capture_key is not None
+            and current_raw is not None
+            and isinstance(self.forward_metadata, DSV4Metadata)
+        ):
+            bucket, bs = capture_key
+            # The captured graph may hold pointers to tensors allocated while
+            # upgrading Raw metadata to full DSV4Metadata inside capture.
+            # Keep those tensors alive even though replay_prepare updates the
+            # Raw metadata object stored in cuda_graph_metadata_of_bucket_and_bs.
+            self._cuda_graph_captured_full_metadata[bucket][bs] = (
+                self.forward_metadata
+            )
+            self.forward_metadata = current_raw
+        self._current_capture_bucket_bs = None
+        self._current_capture_raw = None
 
     def store_cache(
         self, layer_id: int, swa_k: torch.Tensor, forward_batch: ForwardBatch
@@ -1292,10 +1367,9 @@ class DeepseekV4AttnBackend(
                         extra_indices, dcp_world_size, dcp_rank
                     )
                 )
-                # Same rule as C128: C4 is an optional extra source, so a
-                # per-rank empty C4 shard should contribute zero keys rather
-                # than a dummy key.
-                extra_topk_lengths = c4_local_lengths
+                # Same rule as C128: avoid topk_length=0 in FlashMLA while
+                # keeping empty-row indices at -1 so no dummy KV is attended.
+                extra_topk_lengths = torch.clamp(c4_local_lengths, min=1)
                 c4_has_local_kv = c4_local_lengths > 0
 
             if q.ndim == 3:
@@ -1693,6 +1767,10 @@ class DeepseekV4MultiStepBackend(DeepseekV4AttnBackend):
     def on_after_cuda_graph_warmup(self):
         for backend in self.attn_backends:
             backend.on_after_cuda_graph_warmup()
+
+    def on_after_cuda_graph_capture(self):
+        for backend in self.attn_backends:
+            backend.on_after_cuda_graph_capture()
 
     def init_forward_metadata_replay_cuda_graph(
         self, forward_batch: ForwardBatch, bs: int

@@ -73,7 +73,7 @@ def _jit_compress_128_online_module(head_dim: int) -> Module:
     args = make_cpp_args(head_dim, is_arch_support_pdl())
     kernel_class = f"FlashCompress128OnlineKernel<{args}>"
     return load_jit(
-        make_name(f"compress_128_online_v2"),
+        make_name(f"compress_128_online_v2_dcp_activebs"),
         *args,
         cuda_files=["deepseek_v4/c128_online_v2.cuh"],
         cuda_wrappers=[
@@ -194,6 +194,8 @@ class CompressorPrefillPlan(NamedTuple):
     def copy_(self, other) -> None:
         assert isinstance(other, CompressorPrefillPlan)
         assert self.compress_ratio == other.compress_ratio
+        if self.pin_buffer is not None and other.pin_buffer is not None:
+            self.pin_buffer.copy_(other.pin_buffer)
         self.plan_c.copy_(other.plan_c)
         self.plan_w.copy_(other.plan_w)
 
@@ -278,6 +280,7 @@ class CompressorPrefillPlan(NamedTuple):
         num_q_tokens: int,
         use_cuda_graph: bool = False,
         state_slot_offset: int = 0,
+        active_bs: Optional[int] = None,
     ) -> CompressorPrefillPlan:
         seq_lens_cpu = seq_lens.detach().to(torch.int64).cpu()
         extend_lens_cpu = extend_lens.detach().to(torch.int64).cpu()
@@ -305,6 +308,7 @@ class CompressorPrefillPlan(NamedTuple):
             bool(use_cuda_graph),
             int(dcp_world_size),
             int(dcp_rank),
+            int(seq_lens.shape[0] if active_bs is None else active_bs),
         )
         return CompressorPrefillPlan(
             128,

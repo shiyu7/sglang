@@ -13,6 +13,50 @@ if TYPE_CHECKING:
     pass
 
 
+def _maybe_copy_flashmla_sched_meta(dst, src) -> bool:
+    if not (
+        hasattr(dst, "have_initialized")
+        and hasattr(src, "have_initialized")
+        and hasattr(dst, "tile_scheduler_metadata")
+        and hasattr(src, "tile_scheduler_metadata")
+        and hasattr(dst, "num_splits")
+        and hasattr(src, "num_splits")
+    ):
+        return False
+
+    if dst is None or src is None:
+        return False
+
+    # CUDA graphs capture the initialized FlashMLA metadata tensors by pointer.
+    # Replay preparation often builds a fresh, uninitialized metadata object;
+    # replacing the captured object would drop the tensors still referenced by
+    # the graph. Keep the captured object alive in that case.
+    if getattr(dst, "have_initialized", False) and not getattr(
+        src, "have_initialized", False
+    ):
+        return True
+
+    if not getattr(dst, "have_initialized", False) or not getattr(
+        src, "have_initialized", False
+    ):
+        return False
+
+    for field_name in ("tile_scheduler_metadata", "num_splits"):
+        src_val = getattr(src, field_name)
+        dst_val = getattr(dst, field_name)
+        if src_val is None and dst_val is None:
+            continue
+        if src_val is None or dst_val is None or not hasattr(dst_val, "copy_"):
+            return False
+        if tuple(src_val.shape) != tuple(dst_val.shape):
+            return False
+        dst_val.copy_(src_val)
+
+    dst.have_initialized = src.have_initialized
+    dst.config = src.config
+    return True
+
+
 """
 Some comments on the common terms used in DeepSeekV4Backend:
 
@@ -80,7 +124,10 @@ def copy_metadata(
             setattr(dst, field_name, src_val)
 
     for field_name in assign_fields:
-        setattr(dst, field_name, getattr(src, field_name))
+        src_val = getattr(src, field_name)
+        dst_val = getattr(dst, field_name)
+        if not _maybe_copy_flashmla_sched_meta(dst_val, src_val):
+            setattr(dst, field_name, src_val)
 
     provided_fields = check_eq_fields + copy_fields + assign_fields
     provided_fields_unique = set(provided_fields)

@@ -300,8 +300,12 @@ class DecodeInputBuffers(ForwardInputBuffers):
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ):
         if bs != raw_bs:
+            self.input_ids.zero_()
+            self.req_pool_indices.zero_()
             self.seq_lens.fill_(seq_len_fill_value)
             self.out_cache_loc.zero_()
+            self.positions.zero_()
+            self.mrope_positions.zero_()
             # Padded SWA indices left over from a previous replay would point
             # into real SWA slots, so set_kv_buffer on padded tokens would
             # corrupt active requests' KV. Zero the whole buffer so padded
@@ -1171,6 +1175,7 @@ class CudaGraphRunner:
         out = self._capture_graph(
             graph, get_global_graph_memory_pool(), stream, run_once
         )
+        attn_backend.on_after_cuda_graph_capture()
 
         return graph, out
 
