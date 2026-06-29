@@ -42,6 +42,7 @@ struct Prefill0Params {
   const IDX_T* seq_lens_ptr;     // [batch_size]
   const IDX_T* extend_lens_ptr;  // [batch_size]
   uint32_t batch_size;
+  uint32_t active_bs;
   uint32_t num_q_tokens;
   int32_t compress_ratio;
   int32_t swa_page_size;
@@ -60,6 +61,7 @@ struct Prefill1Params {
   uint32_t num_c_padded;
   uint32_t num_w_padded;
   uint32_t num_work;
+  uint32_t active_bs;
   int32_t swa_page_size;
   int32_t ring_size;
   int32_t compress_ratio;
@@ -193,6 +195,7 @@ __global__ __launch_bounds__(1024, 1)  //
     const uint32_t E = s_max_extend;
     for (uint32_t k = tx; k < num_q; k += block_size) {
       const uint32_t batch_id = k / E;
+      if (batch_id >= params.active_bs) continue;
       const uint32_t j = k % E;
       const int32_t pl = s_prefix_len[batch_id];
       const int32_t sl = s_seq_len[batch_id];
@@ -224,7 +227,7 @@ __global__ __launch_bounds__(1024, 1)  //
     // Path 2: general prefill (long extend_len). Iterate batches in an outer loop;
     // the whole block sweeps each batch's tokens in parallel.
     uint32_t base_e = 0;
-    for (uint32_t batch_id = 0; batch_id < params.batch_size; ++batch_id) {
+    for (uint32_t batch_id = 0; batch_id < params.active_bs; ++batch_id) {
       const int32_t pl = s_prefix_len[batch_id];
       const int32_t sl = s_seq_len[batch_id];
       const int32_t el = sl - pl;
@@ -283,8 +286,10 @@ __global__ void plan_compress_prefill_kernel_1(const Prefill1Params params) {
   };
 
   if (!plan_c.is_invalid()) {  // 1. in bound. 2. not masked
-    if (plan_c.buffer_len > 0) {
-      const auto batch_id = plan_c.read_page_1;
+    const auto batch_id = plan_c.read_page_1;
+    if (batch_id >= params.active_bs) {
+      params.plan_c[idx] = PlanC::invalid();
+    } else if (plan_c.buffer_len > 0) {
       const auto rid = params.rid_ptr[batch_id];
       const auto mapping = params.r2t_ptr + rid * params.stride_r2t;
       // `seq_len` should be ratio-aligned here
@@ -310,15 +315,19 @@ __global__ void plan_compress_prefill_kernel_1(const Prefill1Params params) {
 
   if (!plan_w.is_invalid()) {  // 1. in bound. 2. not masked
     const auto [ragged_id, batch_id] = unpack_w(plan_w);
-    const auto rid = params.rid_ptr[batch_id];
-    const auto mapping = params.r2t_ptr + rid * params.stride_r2t;
-    // `seq_len` (`write_loc`) may not be aligned here
-    const auto position = static_cast<int32_t>(plan_w.write_loc - 1);
-    const auto raw_loc = mapping[position];
-    plan_w.ragged_id = ragged_id;
-    plan_w.write_loc =
-        params.compress_ratio == 128 ? raw_loc : compute_loc(params.state_map_ptr[raw_loc]);
-    params.plan_w[idx] = plan_w;
+    if (batch_id >= params.active_bs) {
+      params.plan_w[idx] = PlanW::invalid();
+    } else {
+      const auto rid = params.rid_ptr[batch_id];
+      const auto mapping = params.r2t_ptr + rid * params.stride_r2t;
+      // `seq_len` (`write_loc`) may not be aligned here
+      const auto position = static_cast<int32_t>(plan_w.write_loc - 1);
+      const auto raw_loc = mapping[position];
+      plan_w.ragged_id = ragged_id;
+      plan_w.write_loc =
+          params.compress_ratio == 128 ? raw_loc : compute_loc(params.state_map_ptr[raw_loc]);
+      params.plan_w[idx] = plan_w;
+    }
   } else if (idx < params.num_w_padded) {
     params.plan_w[idx] = PlanW::invalid();
   }
@@ -459,7 +468,8 @@ inline PrefillPlan plan_compress_prefill(
     const int32_t compress_ratio,
     const int32_t swa_page_size,
     const int32_t ring_size,
-    const bool use_cuda_graph) {
+    const bool use_cuda_graph,
+    const int32_t active_bs) {
   auto B = SymbolicSize{"batch_size"};
   auto N = SymbolicSize{"num_q_tokens"};
   auto cpu_or_gpu = SymbolicDevice{};
@@ -502,6 +512,8 @@ inline PrefillPlan plan_compress_prefill(
   constexpr auto kMaxTokens = static_cast<uint32_t>(std::numeric_limits<uint16_t>::max());
   RuntimeCheck(compress_ratio == 4 || compress_ratio == 128);
   RuntimeCheck(batch_size <= num_q_tokens && num_q_tokens <= kMaxTokens);
+  RuntimeCheck(active_bs >= 0);
+  RuntimeCheck(static_cast<uint32_t>(active_bs) <= batch_size);
   // `swa_page_size` >= `ring_size` >= `compress_ratio`
   RuntimeCheck(swa_page_size % ring_size == 0 && ring_size % compress_ratio == 0);
 
@@ -525,6 +537,7 @@ inline PrefillPlan plan_compress_prefill(
         .seq_lens_ptr = seq_ptr,
         .extend_lens_ptr = ext_ptr,
         .batch_size = batch_size,
+        .active_bs = static_cast<uint32_t>(active_bs),
         .num_q_tokens = num_q_tokens,
         .compress_ratio = compress_ratio,
         .swa_page_size = swa_page_size,
@@ -544,6 +557,7 @@ inline PrefillPlan plan_compress_prefill(
         .num_c_padded = num_q_tokens,
         .num_w_padded = num_q_tokens,
         .num_work = num_q_tokens,
+        .active_bs = static_cast<uint32_t>(active_bs),
         .swa_page_size = swa_page_size,
         .ring_size = ring_size,
         .compress_ratio = compress_ratio,
@@ -565,7 +579,7 @@ inline PrefillPlan plan_compress_prefill(
   uint32_t counter_w = 0;
 
   const auto should_compress = [=](int32_t position) { return (position + 1) % compress_ratio == 0; };
-  for (const auto i : irange(batch_size)) {
+  for (const auto i : irange(static_cast<uint32_t>(active_bs))) {
     const int32_t seq_len = seq_ptr[i];
     const int32_t extend_len = ext_ptr[i];
     const int32_t prefix_len = seq_len - extend_len;
@@ -596,7 +610,7 @@ inline PrefillPlan plan_compress_prefill(
     }
     counter += extend_len;
   }
-  RuntimeCheck(counter == num_q_tokens);
+  RuntimeCheck(counter <= num_q_tokens);
 
   const auto copy_to_device = [stream](void* cuda_ptr, auto* host_ptr, size_t count) {
     const auto size_bytes = count * sizeof(*host_ptr);
@@ -620,6 +634,7 @@ inline PrefillPlan plan_compress_prefill(
       .num_c_padded = num_c_padded,
       .num_w_padded = num_w_padded,
       .num_work = std::max(num_c_padded, num_w_padded),
+      .active_bs = static_cast<uint32_t>(active_bs),
       .swa_page_size = swa_page_size,
       .ring_size = ring_size,
       .compress_ratio = compress_ratio,

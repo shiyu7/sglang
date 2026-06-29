@@ -89,7 +89,7 @@ def _jit_compress_128_online_module(head_dim: int) -> Module:
 @cache_once
 def _jit_compress_plan_module() -> Module:
     return load_jit(
-        make_name(f"compress_plan"),
+        make_name(f"compress_plan_activebs"),
         cuda_files=[f"deepseek_v4/c_plan.cuh"],
         cuda_wrappers=[
             ("plan_prefill", "plan_compress_prefill"),
@@ -211,6 +211,7 @@ class CompressorPrefillPlan(NamedTuple):
         ring_size: int,
         num_q_tokens: int,
         use_cuda_graph: bool = False,
+        active_bs: Optional[int] = None,
     ) -> CompressorPrefillPlan:
         is_gpu_input = seq_lens.device.type == "cuda"
         pin_buffer = torch.empty(
@@ -231,6 +232,7 @@ class CompressorPrefillPlan(NamedTuple):
             int(swa_page_size),
             int(ring_size),
             bool(use_cuda_graph),
+            int(seq_lens.shape[0] if active_bs is None else active_bs),
         )
         return CompressorPrefillPlan(
             compress_ratio,

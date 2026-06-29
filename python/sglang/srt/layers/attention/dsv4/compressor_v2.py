@@ -266,6 +266,7 @@ def create_paged_compressor_data(
             ring_size=ring_size,
             num_q_tokens=num_q_tokens,
             use_cuda_graph=use_prefill_cuda_graph,
+            active_bs=online_active_bs,
         )
     else:
         return CompressorDecodePlan.generate(

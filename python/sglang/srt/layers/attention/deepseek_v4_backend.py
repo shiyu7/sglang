@@ -386,6 +386,7 @@ class DSV4RawVerifyMetadata:
 
     extend_seq_lens: Optional[torch.Tensor] = None
     seq_lens_cpu: Optional[List[int]] = None
+    active_bs: Optional[int] = None
     c128_compress_metadata: Optional[FusedCompressMetadata] = None
 
     def copy_(self, other: DSV4RawVerifyMetadata):
@@ -395,6 +396,7 @@ class DSV4RawVerifyMetadata:
 
         self.extend_seq_lens = other.extend_seq_lens
         self.seq_lens_cpu = other.seq_lens_cpu
+        self.active_bs = other.active_bs
         self.c128_compress_metadata = _copy_or_replace(
             self.c128_compress_metadata, other.c128_compress_metadata
         )
@@ -669,6 +671,7 @@ class DeepseekV4AttnBackend(
                 out_cache_loc=out_cache_loc,
                 extend_seq_lens=extend_seq_lens,
                 seq_lens_cpu=seq_lens_cpu_list,
+                active_bs=online_c128_active_bs,
                 c128_compress_metadata=self._make_target_verify_c128_metadata(
                     req_pool_indices,
                     seq_lens,
@@ -768,6 +771,7 @@ class DeepseekV4AttnBackend(
             use_prefill_cuda_graph=True,
             num_q_tokens=num_draft_tokens * bs,
             online_state_slot_offset=online_c128_state_slot_offset,
+            online_active_bs=raw_metadata.active_bs,
         )
         c128_compress_metadata = raw_metadata.c128_compress_metadata
         if c128_compress_metadata is None:
