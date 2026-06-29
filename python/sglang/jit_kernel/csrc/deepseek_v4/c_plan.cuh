@@ -206,13 +206,15 @@ __global__ __launch_bounds__(1024, 1)  //
       if ((position + 1) % cr == 0) {
         const int32_t buffer_len = window_size - min(static_cast<int32_t>(j) + 1, window_size);
         const uint32_t out_idx = atomicAdd(&counter_c, 1u);
-        params.plan_c[out_idx] = {
-            .seq_len = static_cast<uint32_t>(position + 1),
-            .ragged_id = static_cast<uint16_t>(ragged_id),
-            .buffer_len = static_cast<uint16_t>(buffer_len),
-            .read_page_0 = -1,
-            .read_page_1 = static_cast<int32_t>(batch_id),
-        };
+        if (out_idx < num_q) {
+          params.plan_c[out_idx] = {
+              .seq_len = static_cast<uint32_t>(position + 1),
+              .ragged_id = static_cast<uint16_t>(ragged_id),
+              .buffer_len = static_cast<uint16_t>(buffer_len),
+              .read_page_0 = -1,
+              .read_page_1 = static_cast<int32_t>(batch_id),
+          };
+        }
       }
 
       const int32_t last_c_pos = (sl / cr) * cr;
@@ -221,7 +223,9 @@ __global__ __launch_bounds__(1024, 1)  //
       if (!do_write && is_overlap) do_write = (position % sps) >= (sps - cr);
       if (do_write) {
         const uint32_t out_idx = atomicAdd(&counter_w, 1u);
-        params.plan_w[out_idx] = pack_w(ragged_id, batch_id, position + 1);
+        if (out_idx < num_q) {
+          params.plan_w[out_idx] = pack_w(ragged_id, batch_id, position + 1);
+        }
       }
     }
   } else {
@@ -241,20 +245,24 @@ __global__ __launch_bounds__(1024, 1)  //
         if ((position + 1) % cr == 0) {
           const int32_t buffer_len = window_size - min(j + 1, window_size);
           const uint32_t out_idx = atomicAdd(&counter_c, 1u);
-          params.plan_c[out_idx] = {
-              .seq_len = static_cast<uint32_t>(position + 1),
-              .ragged_id = static_cast<uint16_t>(ragged_id),
-              .buffer_len = static_cast<uint16_t>(buffer_len),
-              .read_page_0 = -1,
-              .read_page_1 = static_cast<int32_t>(batch_id),
-          };
+          if (out_idx < num_q) {
+            params.plan_c[out_idx] = {
+                .seq_len = static_cast<uint32_t>(position + 1),
+                .ragged_id = static_cast<uint16_t>(ragged_id),
+                .buffer_len = static_cast<uint16_t>(buffer_len),
+                .read_page_0 = -1,
+                .read_page_1 = static_cast<int32_t>(batch_id),
+            };
+          }
         }
 
         bool do_write = position >= first_w_pos;
         if (!do_write && is_overlap) do_write = (position % sps) >= (sps - cr);
         if (do_write) {
           const uint32_t out_idx = atomicAdd(&counter_w, 1u);
-          params.plan_w[out_idx] = pack_w(ragged_id, static_cast<uint32_t>(batch_id), position + 1);
+          if (out_idx < num_q) {
+            params.plan_w[out_idx] = pack_w(ragged_id, static_cast<uint32_t>(batch_id), position + 1);
+          }
         }
       }
       base_e += static_cast<uint32_t>(el);
@@ -263,8 +271,8 @@ __global__ __launch_bounds__(1024, 1)  //
   __syncthreads();
 
   // === Stage D: pad [counter_c, num_q) / [counter_w, num_q) with invalid ===
-  const auto total_c = counter_c;
-  const auto total_w = counter_w;
+  const auto total_c = min(counter_c, num_q);
+  const auto total_w = min(counter_w, num_q);
   for (uint32_t k = total_c + tx; k < num_q; k += block_size) {
     params.plan_c[k] = PlanC::invalid();
   }
