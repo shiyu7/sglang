@@ -311,6 +311,11 @@ C4_KERNEL void flash_c4_prefill(const __grid_constant__ Compress4PrefillParams p
   // Compact output: one row per compress plan, indexed by `global_pid`.
   const auto kv_out = kv_output + global_pid * Trait::kHeadDim;
   const bool need_overlap = plan.seq_len > 4;
+  // c4_forward reads the missing suffix of the 8-token window from kv_input by
+  // looking back from the current ragged token. Invalid capture padding can
+  // otherwise form pointers before the kv_input allocation.
+  const uint32_t min_current_tokens = need_overlap ? 8u - plan.buffer_len : 4u;
+  if (plan.ragged_id + 1u < min_current_tokens) return;
   if ((need_overlap && plan.buffer_len > 0 && plan.read_page_0 < 0) ||
       (plan.buffer_len > 4 && plan.read_page_1 < 0)) {
     return;
