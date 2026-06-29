@@ -34,6 +34,79 @@ def _use_online_compress(compress_ratio: int) -> bool:
     return compress_ratio == 128 and envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get()
 
 
+_c4_prefill_plan_dump_count = 0
+
+
+def _maybe_debug_dump_c4_prefill_plan(
+    *,
+    forward_batch: ForwardBatch,
+    layer_id: int,
+    kv_score_buffer: torch.Tensor,
+    kv_score_input: torch.Tensor,
+    plan: CompressMetadata,
+    compress_ratio: int,
+) -> None:
+    if os.environ.get("SGLANG_DEBUG_DSV4_C4_PREFILL_PLAN") != "1":
+        return
+    if compress_ratio != 4 or plan.is_decode:
+        return
+    if not forward_batch.forward_mode.is_target_verify():
+        return
+    if torch.cuda.is_current_stream_capturing():
+        return
+
+    global _c4_prefill_plan_dump_count
+    max_dumps = int(os.environ.get("SGLANG_DEBUG_DSV4_C4_PREFILL_PLAN_MAX", "8"))
+    if _c4_prefill_plan_dump_count >= max_dumps:
+        return
+    _c4_prefill_plan_dump_count += 1
+
+    try:
+        plan_c = plan.plan_c.detach().cpu().contiguous()
+        plan_w = plan.plan_w.detach().cpu().contiguous()
+        plan_c_u16 = (
+            plan_c[:, :4].to(torch.int32).view(-1, 2, 2)
+            * torch.tensor([1, 256], dtype=torch.int32)
+        ).sum(dim=-1)
+        plan_c_i32 = plan_c[:, 4:12].view(torch.int32)
+        plan_w_i32 = plan_w[:, :8].view(torch.int32)
+
+        logger.warning(
+            "SGLANG_DEBUG_DSV4_C4_PREFILL_PLAN layer=%s "
+            "kv_buffer_shape=%s kv_input_shape=%s plan_c_shape=%s plan_w_shape=%s "
+            "plan_c_u16_minmax=%s plan_c_i32_minmax=%s plan_w_i32_minmax=%s "
+            "plan_c_head_raw=%s plan_w_head_raw=%s",
+            layer_id,
+            tuple(kv_score_buffer.shape),
+            tuple(kv_score_input.shape),
+            tuple(plan_c.shape),
+            tuple(plan_w.shape),
+            (
+                plan_c_u16.min(dim=0).values.tolist() if plan_c.numel() else [],
+                plan_c_u16.max(dim=0).values.tolist() if plan_c.numel() else [],
+            ),
+            (
+                plan_c_i32.min(dim=0).values.tolist() if plan_c.numel() else [],
+                plan_c_i32.max(dim=0).values.tolist() if plan_c.numel() else [],
+            ),
+            (
+                plan_w_i32.min(dim=0).values.tolist() if plan_w.numel() else [],
+                plan_w_i32.max(dim=0).values.tolist() if plan_w.numel() else [],
+            ),
+            plan_c[:8].tolist(),
+            plan_w[:8].tolist(),
+        )
+    except Exception:
+        logger.exception(
+            "SGLANG_DEBUG_DSV4_C4_PREFILL_PLAN failed layer=%s "
+            "plan_shapes=%s kv_input_shape=%s",
+            layer_id,
+            [tuple(x.shape) for x in plan[1:]],
+            tuple(kv_score_input.shape),
+        )
+        raise
+
+
 def _maybe_debug_sync_target_verify(
     *,
     forward_batch: ForwardBatch,
@@ -95,6 +168,8 @@ class CompressorBackendMixin:
         rotate: bool,
         compress_ratio: int,
         page_size: int,
+        forward_batch: ForwardBatch,
+        layer_id: int,
     ) -> None:
         assert compress_ratio == 4 or compress_ratio == 128
         assert rotate == is_indexer == (head_dim == 128)
@@ -108,6 +183,14 @@ class CompressorBackendMixin:
             last_dim = 2 * head_dim * coff
             assert kv_score_buffer.shape[-1] == last_dim
             kv_score_buffer = kv_score_buffer.view(-1, compress_ratio, last_dim)
+        _maybe_debug_dump_c4_prefill_plan(
+            forward_batch=forward_batch,
+            layer_id=layer_id,
+            kv_score_buffer=kv_score_buffer,
+            kv_score_input=kv_score_input,
+            plan=plan,
+            compress_ratio=compress_ratio,
+        )
         kv_compressed = compress_forward(
             kv_score_buffer=kv_score_buffer,
             kv_score_input=kv_score_input,
@@ -162,6 +245,8 @@ class CompressorBackendMixin:
             rotate=compressor.rotate,
             compress_ratio=compressor.ratio,
             page_size=page_size,
+            forward_batch=forward_batch,
+            layer_id=layer_id,
         )
         _maybe_debug_sync_target_verify(
             forward_batch=forward_batch,
