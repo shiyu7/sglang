@@ -59,6 +59,7 @@ struct Compress4PrefillParams {
   const void* __restrict__ score_bias;
   const PlanC* __restrict__ plan_c;
   const PlanW* __restrict__ plan_w;
+  uint32_t num_kv_pages;
   uint32_t num_q_tokens;
   uint32_t num_compress;
   uint32_t num_write;
@@ -316,8 +317,10 @@ C4_KERNEL void flash_c4_prefill(const __grid_constant__ Compress4PrefillParams p
   // otherwise form pointers before the kv_input allocation.
   const uint32_t min_current_tokens = need_overlap ? 8u - plan.buffer_len : 4u;
   if (plan.ragged_id + 1u < min_current_tokens) return;
-  if ((need_overlap && plan.buffer_len > 0 && plan.read_page_0 < 0) ||
-      (plan.buffer_len > 4 && plan.read_page_1 < 0)) {
+  if ((need_overlap && plan.buffer_len > 0 &&
+       (plan.read_page_0 < 0 || static_cast<uint32_t>(plan.read_page_0) >= params.num_kv_pages)) ||
+      (plan.buffer_len > 4 &&
+       (plan.read_page_1 < 0 || static_cast<uint32_t>(plan.read_page_1) >= params.num_kv_pages))) {
     return;
   }
   // When buffer_len == 0 the whole compression window comes from the current
@@ -353,7 +356,10 @@ WRITE_KERNEL void write_c4_prefill(const __grid_constant__ Compress4PrefillParam
   const auto kv_input = static_cast<const InputFloat*>(params.kv_input) + split_offset;
   const auto kv_buffer = static_cast<BufferFloat*>(params.kv_buffer) + split_offset;
   if (plan.is_invalid()) return;
-  if (plan.ragged_id >= params.num_q_tokens || plan.write_loc < 0) return;
+  if (plan.ragged_id >= params.num_q_tokens || plan.write_loc < 0 ||
+      static_cast<uint32_t>(plan.write_loc) >= params.num_kv_pages * 4u) {
+    return;
+  }
 
   // each warp will handle a contiguous region
   const auto kv_src = kv_input + plan.ragged_id * Trait::kElementSize;
@@ -457,13 +463,14 @@ struct FlashCompress4Kernel {
       const tvm::ffi::TensorView plan_w_) {
     using namespace host;
 
+    auto B = SymbolicSize{"num_kv_pages"};
     auto N = SymbolicSize{"num_q_tokens"};
     auto C = SymbolicSize{"num_c_plans"};
     auto W = SymbolicSize{"num_w_plans"};
     auto device_ = SymbolicDevice{};
     device_.set_options<kDLCUDA>();
 
-    TensorMatcher({-1, 4, Trait::kElementSize})  // kv score
+    TensorMatcher({B, 4, Trait::kElementSize})  // kv score
         .with_dtype<BufferFloat>()
         .with_device(device_)
         .verify(kv_buffer);
@@ -482,6 +489,7 @@ struct FlashCompress4Kernel {
     const auto plan_c = compress::verify_plan_c(plan_c_, C, device_);
     const auto plan_w = compress::verify_plan_w(plan_w_, W, device_);
     const auto device = device_.unwrap();
+    const auto num_kv_pages = static_cast<uint32_t>(B.unwrap());
     const auto num_q_tokens = static_cast<uint32_t>(N.unwrap());
     const auto num_c = static_cast<uint32_t>(C.unwrap());
     const auto num_w = static_cast<uint32_t>(W.unwrap());
@@ -492,6 +500,7 @@ struct FlashCompress4Kernel {
         .score_bias = ape.data_ptr(),
         .plan_c = plan_c,
         .plan_w = plan_w,
+        .num_kv_pages = num_kv_pages,
         .num_q_tokens = num_q_tokens,
         .num_compress = num_c,
         .num_write = num_w,
