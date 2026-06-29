@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import torch
@@ -31,6 +32,58 @@ if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
 logger = logging.getLogger(__name__)
+
+
+def _hadamard_128_torch(x: torch.Tensor) -> torch.Tensor:
+    y = x.float()
+    shape = y.shape
+    dim = y.shape[-1]
+    assert dim == 128
+    h = 1
+    while h < dim:
+        y = y.reshape(*shape[:-1], -1, h * 2)
+        left = y[..., :h]
+        right = y[..., h:]
+        y = torch.cat((left + right, left - right), dim=-1).reshape(*shape)
+        h *= 2
+    return y.reshape_as(x).mul_(dim**-0.5)
+
+
+def _fused_q_indexer_rope_hadamard_quant_torch(
+    q_input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: float,
+    freqs_cis: torch.Tensor,
+    positions: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    q = q_input.float().clone()
+    pos = positions.to(torch.long).clamp(0, freqs_cis.shape[0] - 1)
+    freqs = torch.view_as_real(freqs_cis[pos]).float()
+
+    rope = q[..., 64:].view(*q.shape[:-1], 32, 2)
+    freqs = freqs.view(freqs.shape[0], 1, 32, 2)
+    real = rope[..., 0] * freqs[..., 0] - rope[..., 1] * freqs[..., 1]
+    imag = rope[..., 0] * freqs[..., 1] + rope[..., 1] * freqs[..., 0]
+    q[..., 64:] = torch.stack((real, imag), dim=-1).flatten(-2)
+
+    q = _hadamard_128_torch(q)
+    scale = q.abs().amax(dim=-1, keepdim=True).clamp_(min=1e-4) / 448.0
+    q_fp8 = (q / scale).to(torch.float8_e4m3fn)
+    weights_out = weight.float().mul(float(weight_scale)).mul(scale.squeeze(-1)).unsqueeze(-1)
+    return q_fp8, weights_out
+
+
+def _use_torch_q_indexer_in_capture(forward_batch: ForwardBatch) -> bool:
+    if os.environ.get("SGLANG_DSV4_Q_INDEXER_TORCH_FALLBACK_IN_CAPTURE", "1") != "1":
+        return False
+    if not forward_batch.forward_mode.is_target_verify():
+        return False
+    try:
+        from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
+
+        return get_is_capture_mode()
+    except Exception:
+        return False
 
 
 if is_hip():
@@ -279,7 +332,12 @@ class C4IndexerBackendMixin:
             if q_lora_ready is not None:
                 stream_q.wait_event(q_lora_ready)
             stream_q.wait_event(weights_ready)
-            q_fp8, weights = c4_indexer.compute_q(q_lora, positions, weights)
+            q_fp8, weights = c4_indexer.compute_q(
+                q_lora,
+                positions,
+                weights,
+                use_torch_fallback=_use_torch_q_indexer_in_capture(forward_batch),
+            )
 
         current_stream.wait_stream(stream_q)
         return q_fp8, weights, c4_indexer_kv_cache
@@ -297,7 +355,12 @@ class C4IndexerBackendMixin:
             assert isinstance(self, CompressorBackendMixin)
 
         weights = c4_indexer.compute_weights(x, skip_scale=True)
-        q_fp8, weights = c4_indexer.compute_q(q_lora, positions, weights)
+        q_fp8, weights = c4_indexer.compute_q(
+            q_lora,
+            positions,
+            weights,
+            use_torch_fallback=_use_torch_q_indexer_in_capture(forward_batch),
+        )
         self.forward_indexer_compressor(
             x=x,
             forward_batch=forward_batch,
@@ -526,9 +589,15 @@ class C4Indexer(nn.Module):
         q_lora: torch.Tensor,
         positions: torch.Tensor,
         weight: torch.Tensor,
+        *,
+        use_torch_fallback: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         q, _ = self.wq_b(q_lora)
         q = q.view(-1, self.n_local_heads, self.head_dim)
+        if use_torch_fallback:
+            return _fused_q_indexer_rope_hadamard_quant_torch(
+                q, weight, self.weight_scale, self.freqs_cis, positions
+            )
         return fused_q_indexer_rope_hadamard_quant(
             q, weight, self.weight_scale, self.freqs_cis, positions
         )
