@@ -56,7 +56,7 @@ def _jit_compress_module(
     )
     kernel_class = f"FlashCompress{ratio}Kernel<{args}>"
     return load_jit(
-        make_name(f"compress_{ratio}_v2"),
+        make_name(f"compress_{ratio}_v3"),
         *args,
         cuda_files=[f"deepseek_v4/c{ratio}_v2.cuh"],
         cuda_wrappers=[
