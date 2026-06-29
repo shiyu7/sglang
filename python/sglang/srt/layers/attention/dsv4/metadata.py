@@ -12,6 +12,8 @@ from sglang.srt.utils import is_hip
 if TYPE_CHECKING:
     pass
 
+_TOPK_V2_MAX_SUPPORTED_LENGTH = 262144
+
 
 def _maybe_copy_flashmla_sched_meta(dst, src) -> bool:
     if not (
@@ -150,6 +152,11 @@ class PagedIndexerMetadata:
     topk_metadata: torch.Tensor = field(init=False, repr=False)
 
     def __post_init__(self):
+        if envs.SGLANG_OPT_USE_TOPK_V2.get():
+            self.c4_seq_lens = torch.clamp(
+                self.c4_seq_lens, min=1, max=_TOPK_V2_MAX_SUPPORTED_LENGTH
+            )
+
         if envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.get():
             self.deep_gemm_metadata = None
         else:
