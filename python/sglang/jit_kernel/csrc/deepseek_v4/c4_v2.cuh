@@ -404,6 +404,10 @@ struct FlashCompress4Kernel {
   static constexpr auto decode_kernel = flash_c4_decode<kHeadDim, BufferFloat, InputFloat, OutFloat, kUsePDL>;
   static constexpr auto prefill_c_kernel = flash_c4_prefill<kHeadDim, BufferFloat, InputFloat, OutFloat, kUsePDL>;
   static constexpr auto prefill_w_kernel = write_c4_prefill<kHeadDim, BufferFloat, InputFloat, OutFloat, kUsePDL>;
+  static constexpr auto prefill_c_kernel_no_pdl =
+      flash_c4_prefill<kHeadDim, BufferFloat, InputFloat, OutFloat, false>;
+  static constexpr auto prefill_w_kernel_no_pdl =
+      write_c4_prefill<kHeadDim, BufferFloat, InputFloat, OutFloat, false>;
   static constexpr uint32_t kBlockSize = 128;
   static constexpr uint32_t kTileDim = kTileElements * device::kWarpThreads;
   static constexpr uint32_t kNumSplit = kHeadDim / kTileDim;
@@ -508,11 +512,11 @@ struct FlashCompress4Kernel {
     RuntimeCheck(num_q_tokens >= num_w, "invalid prefill plan: num_q < num_w");
     if (const auto num_c_blocks = div_ceil(num_c * kNumSplit, kWarpsPerBlock)) {
       LaunchKernel(num_c_blocks, kBlockSize, device)  //
-          .enable_pdl(kUsePDL)(prefill_c_kernel, params);
+          .enable_pdl(false)(prefill_c_kernel_no_pdl, params);
     }
     if (const auto num_w_blocks = div_ceil(num_w * kNumSplit, kWarpsPerBlock)) {
       LaunchKernel(num_w_blocks, kBlockSize, device)  //
-          .enable_pdl(kUsePDL)(prefill_w_kernel, params);
+          .enable_pdl(false)(prefill_w_kernel_no_pdl, params);
     }
   }
 };
