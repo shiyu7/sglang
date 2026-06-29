@@ -155,7 +155,7 @@ __global__ __launch_bounds__(1024, 1)  //
 
   // === Stage A: load per-batch fields, init shared scratch ===
   int32_t seq_len = 0, extend_len = 0, prefix_len = 0;
-  if (tx < params.batch_size) {
+  if (tx < params.active_bs) {
     seq_len = static_cast<int32_t>(params.seq_lens_ptr[tx]);
     extend_len = static_cast<int32_t>(params.extend_lens_ptr[tx]);
     prefix_len = seq_len - extend_len;
@@ -172,9 +172,10 @@ __global__ __launch_bounds__(1024, 1)  //
   }
 
   // === Stage B: min/max(extend_len) for MTP-uniform detection ===
-  // For min, treat threads outside `batch_size` as +inf so they don't pull the min down.
+  // For min, treat padded graph slots outside `active_bs` as +inf so they
+  // don't pull the min down or read uninitialized padded metadata.
   const uint32_t e_for_max = static_cast<uint32_t>(extend_len);
-  const uint32_t e_for_min = (tx < params.batch_size) ? e_for_max : 0xFFFFFFFFu;
+  const uint32_t e_for_min = (tx < params.active_bs) ? e_for_max : 0xFFFFFFFFu;
   warp_max[warp_id] = warp_reduce_max_u32(e_for_max);
   warp_min[warp_id] = warp_reduce_min_u32(e_for_min);
   __syncthreads();
@@ -511,9 +512,9 @@ inline PrefillPlan plan_compress_prefill(
   const auto batch_size = static_cast<uint32_t>(B.unwrap());
   constexpr auto kMaxTokens = static_cast<uint32_t>(std::numeric_limits<uint16_t>::max());
   RuntimeCheck(compress_ratio == 4 || compress_ratio == 128);
-  RuntimeCheck(batch_size <= num_q_tokens && num_q_tokens <= kMaxTokens);
   RuntimeCheck(active_bs >= 0);
   RuntimeCheck(static_cast<uint32_t>(active_bs) <= batch_size);
+  RuntimeCheck(static_cast<uint32_t>(active_bs) <= num_q_tokens && num_q_tokens <= kMaxTokens);
   // `swa_page_size` >= `ring_size` >= `compress_ratio`
   RuntimeCheck(swa_page_size % ring_size == 0 && ring_size % compress_ratio == 0);
 
