@@ -59,6 +59,7 @@ struct Compress4PrefillParams {
   const void* __restrict__ score_bias;
   const PlanC* __restrict__ plan_c;
   const PlanW* __restrict__ plan_w;
+  uint32_t num_q_tokens;
   uint32_t num_compress;
   uint32_t num_write;
 };
@@ -304,19 +305,25 @@ C4_KERNEL void flash_c4_prefill(const __grid_constant__ Compress4PrefillParams p
   const auto kv_buffer = static_cast<BufferFloat*>(params.kv_buffer) + split_offset;
   const auto score_bias = static_cast<const InputFloat*>(params.score_bias) + split_offset;
   if (plan.is_invalid()) return;
+  if (plan.ragged_id >= params.num_q_tokens || plan.buffer_len > 8) return;
 
   const auto kv_src = kv_input + plan.ragged_id * Trait::kElementSize;
   // Compact output: one row per compress plan, indexed by `global_pid`.
   const auto kv_out = kv_output + global_pid * Trait::kHeadDim;
+  const bool need_overlap = plan.seq_len > 4;
+  if ((need_overlap && plan.buffer_len > 0 && plan.read_page_0 < 0) ||
+      (plan.buffer_len > 4 && plan.read_page_1 < 0)) {
+    return;
+  }
   // When buffer_len == 0 the whole compression window comes from the current
   // ragged kv_input segment. Stage-1 intentionally leaves read_page_0 as -1 in
   // that case; avoid forming an out-of-bounds pointer that CUDA graph capture
   // may still treat as invalid even if the branch will not dereference it.
-  const auto kv_buf_0 =
-      plan.buffer_len > 0 ? kv_buffer + plan.read_page_0 * Trait::kPageElementSize : kv_buffer;
+  const auto kv_buf_0 = need_overlap && plan.buffer_len > 0
+                            ? kv_buffer + plan.read_page_0 * Trait::kPageElementSize
+                            : kv_buffer;
   const auto kv_buf_1 =
       plan.buffer_len > 4 ? kv_buffer + plan.read_page_1 * Trait::kPageElementSize : kv_buffer;
-  const bool need_overlap = plan.seq_len > 4;
   PDLWaitPrimary<kUsePDL>();
   c4_forward<Trait, kUsePDL, BufferFloat, InputFloat, OutFloat>(
       kv_buf_0, kv_buf_1, kv_src, kv_out, score_bias, need_overlap, plan.buffer_len);
@@ -341,6 +348,7 @@ WRITE_KERNEL void write_c4_prefill(const __grid_constant__ Compress4PrefillParam
   const auto kv_input = static_cast<const InputFloat*>(params.kv_input) + split_offset;
   const auto kv_buffer = static_cast<BufferFloat*>(params.kv_buffer) + split_offset;
   if (plan.is_invalid()) return;
+  if (plan.ragged_id >= params.num_q_tokens || plan.write_loc < 0) return;
 
   // each warp will handle a contiguous region
   const auto kv_src = kv_input + plan.ragged_id * Trait::kElementSize;
@@ -479,6 +487,7 @@ struct FlashCompress4Kernel {
         .score_bias = ape.data_ptr(),
         .plan_c = plan_c,
         .plan_w = plan_w,
+        .num_q_tokens = num_q_tokens,
         .num_compress = num_c,
         .num_write = num_w,
     };
