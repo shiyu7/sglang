@@ -12,7 +12,6 @@ from sglang.jit_kernel.dsv4 import (
     compress_forward,
     compress_norm_rope_store,
 )
-from sglang.jit_kernel.deepseek_v4 import compress_fused_norm_rope_inplace
 from sglang.srt.environ import envs
 
 if TYPE_CHECKING:
@@ -209,65 +208,6 @@ class CompressorBackendMixin:
             kv_score_input=kv_score_input,
             plan=plan,
         )
-        if forward_batch.dcp_kv_mask is not None:
-            compress_fused_norm_rope_inplace(
-                kv_compressed,
-                norm.weight,
-                norm.variance_epsilon,
-                freqs_cis_cache,
-                plan,
-            )
-            _maybe_debug_sync_target_verify(
-                forward_batch=forward_batch,
-                layer_id=layer_id,
-                compress_ratio=compress_ratio,
-                phase="after_compress_fused_norm_rope_inplace",
-                kv_score_input=kv_score_input,
-                plan=plan,
-            )
-            if rotate:
-                from sglang.srt.layers.attention.nsa.nsa_indexer import (
-                    rotate_activation,
-                )
-
-                kv_compressed = rotate_activation(kv_compressed)
-                _maybe_debug_sync_target_verify(
-                    forward_batch=forward_batch,
-                    layer_id=layer_id,
-                    compress_ratio=compress_ratio,
-                    phase="after_rotate_activation",
-                    kv_score_input=kv_score_input,
-                    plan=plan,
-                )
-
-            kv_compressed = kv_compressed.bfloat16()
-            token_to_kv_pool = cast(
-                "DeepSeekV4TokenToKVPool", forward_batch.token_to_kv_pool
-            )
-            out_loc = self._get_out_loc(compress_ratio)
-            if is_indexer:
-                token_to_kv_pool.set_index_k_fused(
-                    layer_id=layer_id,
-                    loc=out_loc,
-                    cache_k=kv_compressed,
-                    dcp_kv_mask=forward_batch.dcp_kv_mask,
-                )
-            else:
-                token_to_kv_pool.set_extra_key_buffer_fused(
-                    layer_id=layer_id,
-                    loc=out_loc,
-                    cache_k=kv_compressed,
-                    dcp_kv_mask=forward_batch.dcp_kv_mask,
-                )
-            _maybe_debug_sync_target_verify(
-                forward_batch=forward_batch,
-                layer_id=layer_id,
-                compress_ratio=compress_ratio,
-                phase="after_dcp_aware_store",
-                kv_score_input=kv_score_input,
-                plan=plan,
-            )
-            return
         # NOTE: we use some hack here...
         compress_norm_rope_store(
             kv_compressed,
@@ -278,6 +218,7 @@ class CompressorBackendMixin:
             out_loc=self._get_out_loc(compress_ratio),
             kvcache=kv_cache,
             page_size=page_size,
+            use_dcp=forward_batch.dcp_kv_mask is not None,
         )
         _maybe_debug_sync_target_verify(
             forward_batch=forward_batch,

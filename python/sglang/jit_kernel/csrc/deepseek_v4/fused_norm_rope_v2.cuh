@@ -35,12 +35,24 @@ struct FusedNormRopeStoreParams {
   float eps;
   uint32_t compress_ratio;
   uint32_t num_tokens;
+  int32_t dcp_world_size;
+  int32_t dcp_rank;
 };
 
 enum class ForwardMode : bool {
   CompressExtend = 0,
   CompressDecode = 1,
 };
+
+SGL_DEVICE int32_t map_dcp_token_loc(
+    const int32_t loc,
+    const int32_t dcp_world_size,
+    const int32_t dcp_rank) {
+  if (loc < 0) return -1;
+  if (dcp_world_size <= 1) return loc;
+  if (loc % dcp_world_size != dcp_rank) return -1;
+  return loc / dcp_world_size;
+}
 
 #define INDEXER_KERNEL __global__ __launch_bounds__(kBlockSize, 8)
 #define FLASHMLA_KERNEL __global__ __launch_bounds__(kBlockSize, 8)
@@ -91,6 +103,8 @@ INDEXER_KERNEL void fused_norm_rope_indexer(const __grid_constant__ FusedNormRop
   } else {
     static_assert(host::dependent_false_v<DType>, "Unsupported Mode");
   }
+  out_loc = map_dcp_token_loc(out_loc, params.dcp_world_size, params.dcp_rank);
+  if (out_loc < 0) return;
   const auto freqs_cis = params.freqs_cis + position * kRopeDim;
 
   PDLWaitPrimary<kUsePDL>();
@@ -249,6 +263,8 @@ FLASHMLA_KERNEL void fused_norm_rope_flashmla(const __grid_constant__ FusedNormR
   } else {
     static_assert(host::dependent_false_v<DType>, "Unsupported Mode");
   }
+  out_loc = map_dcp_token_loc(out_loc, params.dcp_world_size, params.dcp_rank);
+  if (out_loc < 0) return;
   const auto freqs_cis = params.freqs_cis + position * kRopeDim;
 
   PDLWaitPrimary<kUsePDL>();
@@ -353,7 +369,9 @@ struct FusedNormRopeKernel {
       const tvm::ffi::TensorView out_loc,
       const tvm::ffi::TensorView kvcache,
       const bool is_decode,
-      const uint32_t compress_ratio) {
+      const uint32_t compress_ratio,
+      const int32_t dcp_world_size,
+      const int32_t dcp_rank) {
     using namespace host;
     using enum ForwardMode;
 
@@ -395,6 +413,8 @@ struct FusedNormRopeKernel {
         RuntimeCheck(out_loc.size(0) == N.unwrap());
         break;
     }
+    RuntimeCheck(dcp_world_size >= 1);
+    RuntimeCheck(dcp_rank >= 0 && dcp_rank < dcp_world_size);
 
     const auto num_tokens = static_cast<uint32_t>(N.unwrap());
     if (num_tokens == 0) return;
@@ -408,6 +428,8 @@ struct FusedNormRopeKernel {
         .eps = eps,
         .compress_ratio = compress_ratio,
         .num_tokens = num_tokens,
+        .dcp_world_size = dcp_world_size,
+        .dcp_rank = dcp_rank,
     };
     // Indexer packs `kNumWarps` tokens per block (warp-major); FlashMLA uses
     // a whole block per token (cta-major sum-reduce over head_dim=512).
