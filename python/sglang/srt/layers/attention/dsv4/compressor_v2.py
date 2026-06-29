@@ -240,6 +240,7 @@ class CompressorBackendMixin:
                     plan=plan,
                 )
 
+            kv_compressed = kv_compressed.bfloat16()
             token_to_kv_pool = cast(
                 "DeepSeekV4TokenToKVPool", forward_batch.token_to_kv_pool
             )
