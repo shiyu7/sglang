@@ -60,6 +60,12 @@ def _get_optional_param(layer: torch.nn.Module, *names: str) -> torch.Tensor | N
     return None
 
 
+def _discard_mxfp4_marlin_repack_inputs(layer: torch.nn.Module) -> None:
+    for name in ("w13_weight_scale_inv", "w2_weight_scale_inv"):
+        if isinstance(getattr(layer, name, None), torch.nn.Parameter):
+            delattr(layer, name)
+
+
 def prepare_moe_mxfp4_layer_for_marlin(layer: torch.nn.Module) -> None:
     group_size = 32
     w13 = layer.w13_weight.data
@@ -161,3 +167,4 @@ def prepare_moe_mxfp4_layer_for_marlin(layer: torch.nn.Module) -> None:
         layer.w2_weight_bias = torch.nn.Parameter(
             _permute_bias(w2_bias_data), requires_grad=False
         )
+    _discard_mxfp4_marlin_repack_inputs(layer)
