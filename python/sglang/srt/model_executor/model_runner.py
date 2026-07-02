@@ -3264,6 +3264,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if self.hisparse_coordinator is not None:
             self.hisparse_coordinator.num_real_reqs.fill_(forward_batch.batch_size)
 
+        reinit_verify_metadata = (
+            os.environ.get("SGLANG_DSV4_REINIT_VERIFY_METADATA_AFTER_MLP_SYNC") == "1"
+        )
+        if (
+            skip_attn_backend_init
+            and forward_batch.forward_mode.is_target_verify()
+            and reinit_verify_metadata
+        ):
+            self.attn_backend.init_forward_metadata(forward_batch)
+
         # Forward without cuda graph
         if forward_batch.forward_mode.is_decode():
             ret = self.forward_decode(

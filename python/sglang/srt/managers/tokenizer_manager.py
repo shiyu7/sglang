@@ -1881,6 +1881,46 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                         )
                     )
 
+                if os.environ.get("SGLANG_DEBUG_REASONING_OUTPUT") == "1":
+                    visible_text = (
+                        state.get_text()
+                        if isinstance(recv_obj, BatchStrOutput)
+                        else None
+                    )
+                    visible_len = len(visible_text) if visible_text is not None else -1
+                    visible_tail = (
+                        visible_text[-96:].replace("\n", "\\n")
+                        if visible_text
+                        else ""
+                    )
+                    finish_reason = meta_info.get("finish_reason")
+                    finish_type = (
+                        finish_reason.get("type")
+                        if isinstance(finish_reason, dict)
+                        else finish_reason
+                    )
+                    reasoning_tokens = meta_info.get("reasoning_tokens")
+                    completion_tokens = meta_info.get("completion_tokens")
+                    reasoning_done = (
+                        reasoning_tokens is not None
+                        and completion_tokens is not None
+                        and reasoning_tokens < completion_tokens
+                    )
+                    logger.warning(
+                        "[REASONING-OUTPUT] rid=%s dp_rank=%s finish=%s "
+                        "reasoning_tokens=%s completion_tokens=%s "
+                        "reasoning_done=%s visible_len=%d retractions=%s tail=%r",
+                        rid,
+                        meta_info.get("dp_rank"),
+                        finish_type,
+                        reasoning_tokens,
+                        completion_tokens,
+                        reasoning_done,
+                        visible_len,
+                        meta_info.get("num_retractions"),
+                        visible_tail,
+                    )
+
                 del self.rid_to_state[rid]
 
                 # Mark ongoing LoRA request as finished.

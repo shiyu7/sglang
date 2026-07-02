@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, List, Literal, NamedTuple, Optional, Union
 
 import torch
@@ -36,9 +35,6 @@ if TYPE_CHECKING:
     from sglang.srt.layers.attention.deepseek_v4_backend import DeepseekV4AttnBackend
     from sglang.srt.layers.rotary_embedding import RotaryEmbedding
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-
-logger = logging.getLogger(__name__)
-
 
 class FusedCompressMetadata(NamedTuple):
     write_loc: torch.Tensor
@@ -292,44 +288,6 @@ def create_paged_compressor_data(
         else:
             extra_data = None
         plan = CompressorDecodePlan(compress_ratio, seq_lens.to(torch.int32))
-
-    import os as _os
-
-    if _os.environ.get("SGLANG_DEBUG_DSV4_DCP_ATTENTION") == "1":
-        try:
-            from sglang.srt.distributed.parallel_state import (
-                get_dcp_rank as _get_dcp_rank,
-            )
-            from sglang.srt.distributed.parallel_state import (
-                get_dcp_world_size as _get_dcp_world_size,
-            )
-
-            _ws = _get_dcp_world_size()
-            if _ws > 1:
-                _wl = write_loc.detach().to(torch.int64)
-                _valid = _wl >= 0
-                _vc = int(_valid.sum().item())
-                _wmin = int(_wl[_valid].min().item()) if _vc else -1
-                _wmax = int(_wl[_valid].max().item()) if _vc else -1
-                _par = _wl % _ws
-                _p0 = int(((_par == 0) & _valid).sum().item())
-                _p1 = int(((_par == 1) & _valid).sum().item())
-                _own = int(((_par == _get_dcp_rank()) & _valid).sum().item())
-                logger.warning(
-                    "[DCP-WRITE c%d decode] rank=%d ws=%d valid=%d owned=%d wmin=%d wmax=%d parity0=%d parity1=%d wl_head=%s",
-                    compress_ratio,
-                    _get_dcp_rank(),
-                    _ws,
-                    _vc,
-                    _own,
-                    _wmin,
-                    _wmax,
-                    _p0,
-                    _p1,
-                    _wl[:8].tolist(),
-                )
-        except Exception as _e:
-            logger.warning("[DCP-WRITE c%d] log failed: %s", compress_ratio, _e)
 
     return FusedCompressMetadata(write_loc=write_loc, extra_data=extra_data, plan=plan)
 

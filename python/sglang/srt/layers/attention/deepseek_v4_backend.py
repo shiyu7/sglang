@@ -52,6 +52,7 @@ from sglang.srt.layers.attention.dsv4.quant_k_cache import (
 from sglang.srt.layers.dp_attention import (
     get_attention_cp_rank,
     get_attention_cp_size,
+    get_attention_tp_rank,
 )
 from sglang.srt.distributed.parallel_state import get_dcp_rank, get_dcp_world_size
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
@@ -70,6 +71,7 @@ logger = logging.getLogger(__name__)
 SWA_WINDOW = 128
 C4_TOPK = 512
 PAGE_INDEX_ALIGNED_SIZE = 64
+
 
 def _get_logical_forward_mode(forward_batch: ForwardBatch) -> ForwardMode:
     if forward_batch.forward_mode.is_idle():
@@ -1462,75 +1464,32 @@ class DeepseekV4AttnBackend(
                 o_flat = o.reshape(B * S_q, H_q, D_v).to(torch.float32)
                 lse_flat = lse.permute(0, 2, 1).reshape(B * S_q, H_q).contiguous()
 
-                if (
-                    os.environ.get("SGLANG_DEBUG_DSV4_DCP_ATTENTION") == "1"
-                    and compress_ratio == 4
-                    and c4_has_local_kv is not None
-                ):
-                    # Corner case (d): rows with empty SWA shard but non-empty
-                    # c4 extra. FlashMLA must combine swa(empty)+extra(non-empty)
-                    # correctly; if it returns lse=+inf because the SWA partition
-                    # is empty, this rank silently drops the c4 contribution and
-                    # cp_lse_ag_out_rs treats the row as "no local KV".
-                    swa_mask = (
-                        core_attn_metadata.dcp_swa_has_local_kv[: B * S_q]
-                        if core_attn_metadata.dcp_swa_has_local_kv is not None
-                        else torch.zeros(B * S_q, dtype=torch.bool, device=o.device)
-                    )
-                    c4_mask = c4_has_local_kv[: B * S_q]
-                    swa_only = swa_mask & ~c4_mask
-                    c4_only = ~swa_mask & c4_mask
-                    both = swa_mask & c4_mask
-                    none = ~swa_mask & ~c4_mask
-                    # Per-row LSE finite-ness right after FlashMLA returned:
-                    # take per-row mean across heads to summarise.
-                    lse_row = lse_flat  # [B*S_q, H_q]
-                    finite_mask = torch.isfinite(lse_row)
-                    finite_per_row = finite_mask.any(dim=1)
-                    o_norm = o_flat.float().norm(dim=-1).max(dim=-1).values  # [B*S_q]
-                    rank_dbg = dcp_group.rank_in_group
-                    n_c4_only = int(c4_only.sum().item())
-                    n_swa_only = int(swa_only.sum().item())
-                    n_both = int(both.sum().item())
-                    n_none = int(none.sum().item())
-                    if c4_only.any():
-                        finite_in_c4_only = int(
-                            (finite_per_row & c4_only).sum().item()
-                        )
-                        nonzero_o_in_c4_only = int(
-                            ((o_norm > 0) & c4_only).sum().item()
-                        )
-                        logger.warning(
-                            "[DCP-MIXED c4] rank=%d ws=%d c4_only=%d "
-                            "swa_only=%d both=%d none=%d "
-                            "finite_lse_in_c4_only=%d nonzero_o_in_c4_only=%d",
-                            rank_dbg, dcp_group.world_size,
-                            n_c4_only, n_swa_only, n_both, n_none,
-                            finite_in_c4_only, nonzero_o_in_c4_only,
-                        )
-                    else:
-                        logger.warning(
-                            "[DCP-MIXED c4] rank=%d ws=%d c4_only=0 "
-                            "swa_only=%d both=%d none=%d (no edge-d rows)",
-                            rank_dbg, dcp_group.world_size,
-                            n_swa_only, n_both, n_none,
-                        )
-
                 merged, merged_lse = cp_lse_ag_out_rs(
                     o_flat, lse_flat, dcp_group, return_lse=True
                 )
                 local_heads = H_q // dcp_group.world_size
-                sink_start = dcp_group.rank_in_group * local_heads
+                attn_sink_flat = attn_sink.reshape(-1)
+                if attn_sink_flat.numel() == H_q:
+                    sink_start = dcp_group.rank_in_group * local_heads
+                else:
+                    # DeepSeek V4 keeps attn_sink as the full attention-TP head
+                    # vector, while q is gathered only within the DCP subgroup.
+                    sink_start = get_attention_tp_rank() * local_heads
                 sink_end = sink_start + local_heads
-                local_attn_sink = attn_sink[sink_start:sink_end].to(torch.float32)
+                local_attn_sink = attn_sink_flat[sink_start:sink_end].to(
+                    torch.float32
+                )
+                assert local_attn_sink.numel() == local_heads, (
+                    f"Invalid DCP attn_sink slice: {attn_sink_flat.shape=} "
+                    f"{H_q=} {local_heads=} {sink_start=} {sink_end=}"
+                )
+                sink_denominator = 1.0 + torch.exp(
+                    local_attn_sink[None, :] - merged_lse
+                )
                 sink_scale = torch.where(
                     torch.isneginf(merged_lse),
                     torch.zeros_like(merged_lse),
-                    1.0
-                    / (
-                        1.0
-                        + torch.exp(local_attn_sink[None, :] - merged_lse)
-                    ),
+                    1.0 / sink_denominator,
                 )
                 # ``merged`` and ``sink_scale`` are both fp32 here; keep the fold
                 # in fp32 and only cast back to the model dtype after the fold.

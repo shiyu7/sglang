@@ -1033,6 +1033,8 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             )
 
         self.out_cache_loc = self._pad_tensor_to_size(self.out_cache_loc, num_tokens)
+        if self.dcp_kv_mask is not None:
+            self.dcp_kv_mask = self._pad_tensor_to_size(self.dcp_kv_mask, num_tokens)
         if self.out_cache_loc_swa is not None:
             self.out_cache_loc_swa = self._pad_tensor_to_size(
                 self.out_cache_loc_swa, num_tokens

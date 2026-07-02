@@ -56,7 +56,7 @@ def _jit_compress_module(
     )
     kernel_class = f"FlashCompress{ratio}Kernel<{args}>"
     return load_jit(
-        make_name(f"compress_{ratio}_v7"),
+        make_name(f"compress_{ratio}_v8_dcpguard"),
         *args,
         cuda_files=[f"deepseek_v4/c{ratio}_v2.cuh"],
         cuda_wrappers=[
@@ -89,7 +89,7 @@ def _jit_compress_128_online_module(head_dim: int) -> Module:
 @cache_once
 def _jit_compress_plan_module() -> Module:
     return load_jit(
-        make_name(f"compress_plan_activebs_v3"),
+        make_name(f"compress_plan_activebs_v4_dcp"),
         cuda_files=[f"deepseek_v4/c_plan.cuh"],
         cuda_wrappers=[
             ("plan_prefill", "plan_compress_prefill"),
@@ -133,6 +133,7 @@ class CompressorDecodePlan(NamedTuple):
         ring_size: int,
     ) -> CompressorDecodePlan:
         module = _jit_compress_plan_module()
+        dcp_world_size, dcp_rank = _get_dcp_world_rank()
         plan_d = module.plan_decode(
             req_pool_indices,
             req_to_token,
@@ -141,6 +142,8 @@ class CompressorDecodePlan(NamedTuple):
             int(compress_ratio),
             int(swa_page_size),
             int(ring_size),
+            int(dcp_world_size),
+            int(dcp_rank),
         )
         return CompressorDecodePlan(compress_ratio, torch.from_dlpack(plan_d))
 
@@ -220,6 +223,7 @@ class CompressorPrefillPlan(NamedTuple):
             pin_memory=not is_gpu_input,
         )
         module = _jit_compress_plan_module()
+        dcp_world_size, dcp_rank = _get_dcp_world_rank()
         plan_c, plan_w = module.plan_prefill(
             req_pool_indices,
             req_to_token,
@@ -233,6 +237,8 @@ class CompressorPrefillPlan(NamedTuple):
             int(ring_size),
             bool(use_cuda_graph),
             int(seq_lens.shape[0] if active_bs is None else active_bs),
+            int(dcp_world_size),
+            int(dcp_rank),
         )
         return CompressorPrefillPlan(
             compress_ratio,

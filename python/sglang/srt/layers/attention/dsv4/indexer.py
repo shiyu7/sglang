@@ -594,6 +594,24 @@ class C4Indexer(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         q, _ = self.wq_b(q_lora)
         q = q.view(-1, self.n_local_heads, self.head_dim)
+        shape_mismatch = (
+            positions.shape[0] != q.shape[0] or weight.shape[0] != q.shape[0]
+        )
+        if shape_mismatch:
+            logger.error(
+                "C4Indexer.compute_q shape mismatch: "
+                "layer_id=%s q_lora_shape=%s q_shape=%s weight_shape=%s "
+                "positions_shape=%s use_torch_fallback=%s n_local_heads=%s "
+                "head_dim=%s",
+                self.layer_id,
+                tuple(q_lora.shape),
+                tuple(q.shape),
+                tuple(weight.shape),
+                tuple(positions.shape),
+                use_torch_fallback,
+                self.n_local_heads,
+                self.head_dim,
+            )
         if use_torch_fallback:
             return _fused_q_indexer_rope_hadamard_quant_torch(
                 q, weight, self.weight_scale, self.freqs_cis, positions

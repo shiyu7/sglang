@@ -41,6 +41,7 @@ class SetKAndS:
         nope_fp8_rope_bf16_pack: NopeFp8RopeBf16Pack,
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
+        write_mask: torch.Tensor | None = None,
     ):
         cls.triton(
             pool,
@@ -49,10 +50,21 @@ class SetKAndS:
             nope_fp8_rope_bf16_pack,
             dcp_world_size=dcp_world_size,
             dcp_rank=dcp_rank,
+            write_mask=write_mask,
         )
 
     @classmethod
-    def torch(cls, pool, buf, loc, nope_fp8_rope_bf16_pack: NopeFp8RopeBf16Pack):
+    def torch(
+        cls,
+        pool,
+        buf,
+        loc,
+        nope_fp8_rope_bf16_pack: NopeFp8RopeBf16Pack,
+        write_mask: torch.Tensor | None = None,
+    ):
+        if write_mask is not None:
+            nope_fp8_rope_bf16_pack = nope_fp8_rope_bf16_pack.slice_pack(write_mask)
+            loc = loc[write_mask]
         _set_k_and_s_torch(buf, loc, nope_fp8_rope_bf16_pack, pool.page_size)
 
     @classmethod
@@ -64,6 +76,7 @@ class SetKAndS:
         nope_fp8_rope_bf16_pack: NopeFp8RopeBf16Pack,
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
+        write_mask: torch.Tensor | None = None,
     ):
         _set_k_and_s_triton(
             buf,
@@ -72,6 +85,7 @@ class SetKAndS:
             pool.page_size,
             dcp_world_size=dcp_world_size,
             dcp_rank=dcp_rank,
+            write_mask=write_mask,
         )
 
 
@@ -82,6 +96,7 @@ def _set_k_and_s_triton(
     page_size: int,
     dcp_world_size: int = 1,
     dcp_rank: int = 0,
+    write_mask: torch.Tensor | None = None,
 ):
     num_pages, buf_numel_per_page = buf.shape
     (num_tokens_to_write,) = loc.shape
@@ -115,6 +130,14 @@ def _set_k_and_s_triton(
     assert k_nope.is_contiguous()
     assert k_rope.is_contiguous()
     assert scale_k_nope.is_contiguous()
+    if write_mask is None:
+        write_mask = loc
+        has_write_mask = False
+    else:
+        assert write_mask.shape == loc.shape, f"{write_mask.shape=} {loc.shape=}"
+        assert write_mask.dtype == torch.bool, f"{write_mask.dtype=}"
+        assert write_mask.is_contiguous()
+        has_write_mask = True
 
     buf_fp8 = buf.view(fp8_dtype)
     buf_bf16 = buf.view(torch.bfloat16)
@@ -128,6 +151,7 @@ def _set_k_and_s_triton(
         buf_bf16,
         buf_uint8,
         loc,
+        write_mask,
         k_nope,
         k_rope,
         scale_k_nope,
@@ -147,6 +171,7 @@ def _set_k_and_s_triton(
         BLOCK_SCALE=8,
         DCP_WORLD_SIZE=dcp_world_size,
         DCP_RANK=dcp_rank,
+        HAS_WRITE_MASK=has_write_mask,
     )
 
 
@@ -156,6 +181,7 @@ def _set_k_and_s_triton_kernel(
     buf_bf16_ptr,
     buf_uint8_ptr,
     loc_ptr,
+    write_mask_ptr,
     k_nope_ptr,
     k_rope_ptr,
     scale_k_nope_ptr,
@@ -175,8 +201,13 @@ def _set_k_and_s_triton_kernel(
     BLOCK_SCALE: tl.constexpr,
     DCP_WORLD_SIZE: tl.constexpr,
     DCP_RANK: tl.constexpr,
+    HAS_WRITE_MASK: tl.constexpr,
 ):
     token_id = tl.program_id(0)
+    if HAS_WRITE_MASK:
+        if not tl.load(write_mask_ptr + token_id):
+            return
+
     loc = tl.load(loc_ptr + token_id)
 
     # DCP: each rank only owns the slots whose global ``loc`` satisfies

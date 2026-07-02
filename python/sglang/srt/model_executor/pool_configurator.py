@@ -44,6 +44,7 @@ class MemoryPoolConfig:
     c4_max_total_num_tokens: int = 0
     c128_max_total_num_tokens: int = 0
     c4_state_pool_size: int = 0
+    c4_indexer_state_pool_size: int = 0
     c128_state_pool_size: int = 0
 
     mem_fraction_static: Optional[float] = None
@@ -335,6 +336,7 @@ class _DSV4PoolSizes:
     c4_max_total_num_tokens: int
     c128_max_total_num_tokens: int
     c4_state_pool_size: int
+    c4_indexer_state_pool_size: int
     c128_state_pool_size: int
 
 
@@ -467,9 +469,14 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
     def _compute_dsv4_sizes(self, full_token: int, page_size: int) -> _DSV4PoolSizes:
         full_token = full_token // page_size * page_size
         swa_tokens = int(full_token * self.swa_ratio) // page_size * page_size
-        # c4/c128 state pools are not DCP-sharded through token allocators:
-        # each DCP rank owns a private CompressStatePool buffer. Keep the
-        # public token capacities logical, but size state pools per rank.
+        # c4 attention state is addressed by the common c4 planner in global
+        # SWA coordinates. Keep it logical/global per rank; the final c4 KV
+        # cache write is what gets DCP-sharded. The c4 indexer state also feeds
+        # the globally replicated c4 indexer KV cache, so keep it global too.
+        #
+        # Online c128 has a DCP-aware planner that maps chunk owners to local
+        # state slots, so it can be sized per rank. The offline/common c128
+        # planner performs the same local slot mapping before touching state.
         per_rank_full_token = (
             full_token // self._dcp_size if self._dcp_size > 1 else full_token
         )
@@ -485,7 +492,10 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
             swa_max_total_num_tokens=swa_tokens,
             c4_max_total_num_tokens=full_token // (4 * self.c4_shrink_factor),
             c128_max_total_num_tokens=full_token // 128,
-            c4_state_pool_size=per_rank_swa_tokens
+            c4_state_pool_size=swa_tokens
+            // self.swa_page_size
+            * self.c4_ring_size,
+            c4_indexer_state_pool_size=swa_tokens
             // self.swa_page_size
             * self.c4_ring_size,
             c128_state_pool_size=c128_state_pool_size,
@@ -499,6 +509,7 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
             f"c4={sizes.c4_max_total_num_tokens}, "
             f"c128={sizes.c128_max_total_num_tokens}, "
             f"c4_state={sizes.c4_state_pool_size}, "
+            f"c4_indexer_state={sizes.c4_indexer_state_pool_size}, "
             f"c128_state={sizes.c128_state_pool_size}"
         )
         return MemoryPoolConfig(
@@ -508,6 +519,7 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
             c4_max_total_num_tokens=sizes.c4_max_total_num_tokens,
             c128_max_total_num_tokens=sizes.c128_max_total_num_tokens,
             c4_state_pool_size=sizes.c4_state_pool_size,
+            c4_indexer_state_pool_size=sizes.c4_indexer_state_pool_size,
             c128_state_pool_size=sizes.c128_state_pool_size,
         )
 

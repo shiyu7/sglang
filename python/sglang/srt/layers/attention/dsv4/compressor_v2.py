@@ -218,7 +218,9 @@ class CompressorBackendMixin:
             out_loc=self._get_out_loc(compress_ratio),
             kvcache=kv_cache,
             page_size=page_size,
-            use_dcp=forward_batch.dcp_kv_mask is not None,
+            # c4/c128 attention KV is DCP-local, but the c4 indexer cache is
+            # read through the global c4 page table before topk is localized.
+            use_dcp=(forward_batch.dcp_kv_mask is not None and not is_indexer),
         )
         _maybe_debug_sync_target_verify(
             forward_batch=forward_batch,

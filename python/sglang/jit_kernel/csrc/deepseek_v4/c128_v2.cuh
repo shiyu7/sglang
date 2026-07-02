@@ -56,6 +56,7 @@ struct Compress128DecodeParams {
   const void* __restrict__ score_bias;
   const PlanD* __restrict__ plan_d;
   uint32_t batch_size;
+  uint32_t num_kv_pages;
 };
 
 struct Compress128PrefillParams {
@@ -67,6 +68,7 @@ struct Compress128PrefillParams {
   const PlanW* __restrict__ plan_w;
   uint32_t num_compress;
   uint32_t num_write;
+  uint32_t num_kv_pages;
 };
 
 struct Compress128SharedBuffer {
@@ -289,6 +291,11 @@ C128_KERNEL void flash_c128_decode(const __grid_constant__ Compress128DecodePara
   if (global_bid >= params.batch_size) return;
 
   const auto plan = params.plan_d[global_bid];
+  if (plan.write_loc < 0 || plan.read_page_1 < 0 ||
+      static_cast<uint32_t>(plan.read_page_1) >= params.num_kv_pages ||
+      static_cast<uint32_t>(plan.write_loc) >= params.num_kv_pages * 128u) {
+    return;
+  }
   const auto kv_input = static_cast<const InputFloat*>(params.kv_input) + split_offset;
   const auto kv_output = static_cast<OutFloat*>(params.kv_output) + split_offset;
   const auto kv_buffer = static_cast<BufferFloat*>(params.kv_buffer) + split_offset;
@@ -326,6 +333,7 @@ C128_KERNEL void flash_c128_prefill(const __grid_constant__ Compress128PrefillPa
   const auto kv_buffer = static_cast<BufferFloat*>(params.kv_buffer) + split_offset;
   const auto score_bias = static_cast<const InputFloat*>(params.score_bias) + split_offset;
   if (plan.is_invalid()) return;
+  if (plan.read_page_1 < 0 || static_cast<uint32_t>(plan.read_page_1) >= params.num_kv_pages) return;
 
   const auto kv_src = kv_input + plan.ragged_id * Trait::kElementSize;
   // Compact output: one row per compress plan, indexed by `global_pid`.
@@ -354,6 +362,7 @@ WRITE_KERNEL void write_c128_prefill(const __grid_constant__ Compress128PrefillP
   const auto kv_input = static_cast<const InputFloat*>(params.kv_input) + split_offset;
   const auto kv_buffer = static_cast<BufferFloat*>(params.kv_buffer) + split_offset;
   if (plan.is_invalid()) return;
+  if (plan.write_loc < 0 || static_cast<uint32_t>(plan.write_loc) >= params.num_kv_pages * 128u) return;
 
   // each warp will handle a contiguous region
   const auto kv_src = kv_input + plan.ragged_id * Trait::kElementSize;
@@ -440,6 +449,7 @@ struct FlashCompress128Kernel {
         .score_bias = ape.data_ptr(),
         .plan_d = plan_d,
         .batch_size = batch_size,
+        .num_kv_pages = static_cast<uint32_t>(kv_buffer.size(0)),
     };
     const uint32_t num_blocks = batch_size * kNumSplit;
     LaunchKernel(num_blocks, kBlockSize, device_.unwrap())  //
@@ -493,6 +503,7 @@ struct FlashCompress128Kernel {
         .plan_w = plan_w,
         .num_compress = num_c,
         .num_write = num_w,
+        .num_kv_pages = static_cast<uint32_t>(kv_buffer.size(0)),
     };
     RuntimeCheck(num_q_tokens >= num_w, "invalid prefill plan: num_q < num_w");
     if (const auto num_c_blocks = num_c * kNumSplit) {

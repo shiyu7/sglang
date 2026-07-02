@@ -138,22 +138,25 @@ __global__ void online_c128_mtp_write_prefix_kernel(
   const bool has_partial = seq_before > 0 && start_pos != 0;
 
   int64_t init_slot = 0;
+  bool has_init_state = false;
   if (has_partial) {
     const int64_t chunk_start = ((seq_before - 1) / 128) * 128;
     if (chunk_start < 0 || chunk_start >= params.req_to_token_stride_b) return;
     const int64_t full_loc =
         static_cast<int64_t>(params.req_to_token[req_idx * params.req_to_token_stride_b + chunk_start]);
     if (full_loc < 0) return;
-    init_slot =
-        map_dcp_c128_state_slot(full_loc, params.dcp_world_size, params.dcp_rank);
-    if (init_slot < 0 || init_slot >= params.state_slot_stride) return;
+    init_slot = map_dcp_c128_state_slot(full_loc, params.dcp_world_size, params.dcp_rank);
+    if (init_slot >= params.state_slot_stride) return;
+    // A non-local previous chunk can still draft across the 128-token boundary
+    // into a local chunk. Keep running from an empty state and let pos==0 reset.
+    has_init_state = init_slot >= 0;
   }
 
   for (int64_t d = static_cast<int64_t>(threadIdx.x); d < kHeadDim; d += blockDim.x) {
     float run_max = 0.0f;
     float run_sum = 0.0f;
     float run_kv = 0.0f;
-    if (has_partial) {
+    if (has_init_state) {
       const float* const init = params.state + init_slot * params.state_stride_b;
       run_max = init[d];
       run_sum = init[kHeadDim + d];

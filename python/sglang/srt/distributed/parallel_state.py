@@ -766,10 +766,9 @@ class GroupCoordinator:
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
 
-        # Perform reduce-scatter operation
-        torch.distributed.reduce_scatter_tensor(
-            output_tensor, input_tensor, group=self.device_group
-        )
+        # Perform reduce-scatter operation through the coordinator wrapper so
+        # DCP uses the same registered communicator path as other collectives.
+        self.reduce_scatter_tensor(output_tensor, input_tensor)
 
         # Reshape before returning
         return output_tensor.movedim(0, dim).contiguous()

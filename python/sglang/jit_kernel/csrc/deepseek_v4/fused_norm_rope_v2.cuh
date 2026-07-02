@@ -50,6 +50,7 @@ SGL_DEVICE int32_t map_dcp_token_loc(
     const int32_t dcp_rank) {
   if (loc < 0) return -1;
   if (dcp_world_size <= 1) return loc;
+  if (loc == 0) return -1;
   if (loc % dcp_world_size != dcp_rank) return -1;
   return loc / dcp_world_size;
 }

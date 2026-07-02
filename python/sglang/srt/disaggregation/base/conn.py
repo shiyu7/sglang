@@ -47,6 +47,9 @@ class KVArgs:
     kv_head_num: int
     total_kv_head_num: int
     page_size: int
+    # Optional SWA page size for heterogeneous KV pools such as DeepSeek V4.
+    # DSV4 compressor states are indexed from SWA locs, not full-KV page locs.
+    swa_page_size: Optional[int] = None
     # for system dp
     system_dp_rank: int
     # for pp prefill

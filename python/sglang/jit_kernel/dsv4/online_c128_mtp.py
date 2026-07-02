@@ -27,7 +27,7 @@ def _get_dcp_world_rank() -> tuple[int, int]:
 def _jit_online_c128_mtp_module(head_dim: int) -> Module:
     args = make_cpp_args(head_dim)
     return load_jit(
-        make_name(f"online_c128_mtp_guarded_{head_dim}"),
+        make_name(f"online_c128_mtp_dcp_boundary_{head_dim}"),
         *args,
         cuda_files=["deepseek_v4/online_c128_mtp.cuh"],
         cuda_wrappers=[
@@ -41,6 +41,7 @@ def _jit_online_c128_mtp_module(head_dim: int) -> Module:
 
 @dataclass
 class _OnlineC128LayerRuntime:
+    layer_id: int
     head_dim: int
     main_state: torch.Tensor
     state_slot_offset: int
@@ -84,7 +85,8 @@ class OnlineC128MTPController:
             seq_lens=seq_lens.detach(),
         )
         head_dim = self._head_dim()
-        if head_dim is None or self._num_verify_tokens() == 0:
+        num_verify_tokens = self._num_verify_tokens()
+        if head_dim is None or num_verify_tokens == 0:
             return
         token_to_kv_pool = self.backend.token_to_kv_pool
         _jit_online_c128_mtp_module(head_dim).mark_pending(
@@ -128,6 +130,7 @@ class OnlineC128MTPController:
         self.commit_pending(
             req_pool_indices=active_req_pool_indices,
             seq_lens=active_seq_lens,
+            mode=int(logical_forward_mode),
         )
         if not logical_forward_mode.is_target_verify():
             return 0
@@ -187,6 +190,8 @@ class OnlineC128MTPController:
         self,
         req_pool_indices: torch.Tensor,
         seq_lens: torch.Tensor,
+        *,
+        mode: Optional[int] = None,
     ) -> None:
         if self._verify_ctx is None:
             return
@@ -262,6 +267,7 @@ class OnlineC128MTPController:
                 )
                 runtimes.append(
                     _OnlineC128LayerRuntime(
+                        layer_id=compressor.layer_id,
                         head_dim=compressor.head_dim,
                         main_state=state_pool.kv_score_buffer.kv_score,
                         state_slot_offset=state_pool.online_mtp_state_slot_offset,

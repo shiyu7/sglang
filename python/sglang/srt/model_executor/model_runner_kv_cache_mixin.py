@@ -393,7 +393,9 @@ class ModelRunnerKVCacheMixin:
                 swa_size=_phys_dsv4_swa,
                 c4_size=_phys_c4,
                 c128_size=_phys_c128,
+                c4_indexer_size=self.c128_max_total_num_tokens * 32,
                 c4_state_pool_size=self.c4_state_pool_size,
+                c4_indexer_state_pool_size=self.c4_indexer_state_pool_size,
                 c128_state_pool_size=self.c128_state_pool_size,
                 page_size=self.page_size,
                 swa_page_size=swa_page_size,
@@ -921,11 +923,13 @@ class ModelRunnerKVCacheMixin:
             self.c4_max_total_num_tokens = 0
             self.c128_max_total_num_tokens = 0
             self.c4_state_pool_size = 0
+            self.c4_indexer_state_pool_size = 0
             self.c128_state_pool_size = 0
         else:
             self.c4_max_total_num_tokens = config.c4_max_total_num_tokens
             self.c128_max_total_num_tokens = config.c128_max_total_num_tokens
             self.c4_state_pool_size = config.c4_state_pool_size
+            self.c4_indexer_state_pool_size = config.c4_indexer_state_pool_size
             self.c128_state_pool_size = config.c128_state_pool_size
 
         # Draft worker does not own the compression-state pools, but keep the

@@ -85,8 +85,6 @@ def _correct_attn_cp_out_kernel(
         num_n_offsets * lses_stride_N + b_i32 * lses_stride_B + h_i32 * lses_stride_H
     )
 
-    # FlashMLA returns natural-log LSEs, so the cross-rank merge must use
-    # natural exp/log. Using exp2/log2 skews the softmax correction weights.
     lse = tl.load(lses_ptr + lse_offsets)
     neg_inf = float("-inf")
     lse = tl.where((lse != lse) | (lse == float("inf")), neg_inf, lse)

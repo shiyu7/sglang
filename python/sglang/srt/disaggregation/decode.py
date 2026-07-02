@@ -519,6 +519,7 @@ class DecodePreallocQueue:
         kv_args.page_size = (
             1 if self.scheduler.enable_hisparse else self.token_to_kv_pool.page_size
         )
+        kv_args.swa_page_size = getattr(self.token_to_kv_pool, "swa_page_size", None)
 
         kv_args.aux_data_ptrs, kv_args.aux_data_lens, kv_args.aux_item_lens = (
             self.metadata_buffers.get_buf_infos()
@@ -1150,12 +1151,16 @@ class DecodePreallocQueue:
                     # DSV4 state_data flat layout is heterogeneous:
                     # [swa_kv, compress_state, indexer_compress_state].
                     # Under DCP, swa_kv is sharded by SWA-token loc while
-                    # compress states are not sharded and remain page-level.
+                    # c4/indexer states remain SWA-page based and c128 states
+                    # are reconstructed from full-token c128 slots. Carry the
+                    # sequence offset so online c128 can select chunk starts.
                     # Return both lists; mooncake interprets this expanded
                     # payload only for DSV4+DCP.
                     return [
                         window_kv_indices_swa_np,
                         kv_to_page_indices(window_kv_indices_swa_np, page_size),
+                        window_kv_indices_full.cpu().numpy(),
+                        np.array([window_start], dtype=np.int32),
                     ]
                 return kv_to_page_indices(
                     window_kv_indices_swa_np, page_size

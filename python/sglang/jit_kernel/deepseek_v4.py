@@ -718,7 +718,13 @@ def fused_q_indexer_rope_hadamard_quant(
     )
     module = _jit_main_q_indexer_rope_hadamard_quant_module(q_input.dtype)
     module.forward(
-        q_input, q_fp8, weight, weights_out, float(weight_scale), freqs_real, positions
+        q_input,
+        q_fp8,
+        weight,
+        weights_out,
+        float(weight_scale),
+        freqs_real,
+        positions,
     )
     return q_fp8, weights_out
 

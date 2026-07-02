@@ -65,6 +65,8 @@ struct Prefill1Params {
   int32_t swa_page_size;
   int32_t ring_size;
   int32_t compress_ratio;
+  int32_t dcp_world_size;
+  int32_t dcp_rank;
 };
 
 struct DecodeParams {
@@ -78,6 +80,8 @@ struct DecodeParams {
   int32_t swa_page_size;
   int32_t ring_size;
   int32_t compress_ratio;
+  int32_t dcp_world_size;
+  int32_t dcp_rank;
 };
 
 struct Prefill1ParamsLegacy {
@@ -128,6 +132,18 @@ SGL_DEVICE uint32_t warp_reduce_min_u32(uint32_t val) {
     val = min(val, __shfl_xor_sync(0xFFFFFFFF, val, mask, 32));
   }
   return val;
+}
+
+SGL_DEVICE int32_t map_dcp_c128_state_loc(
+    const int32_t full_loc,
+    const int32_t dcp_world_size,
+    const int32_t dcp_rank) {
+  if (full_loc < 0) return -1;
+  const int32_t logical_page = full_loc / 128;
+  const int32_t page_offset = full_loc % 128;
+  if (dcp_world_size <= 1) return full_loc;
+  if (logical_page % dcp_world_size != dcp_rank) return -1;
+  return (logical_page / dcp_world_size) * 128 + page_offset;
 }
 
 __global__ __launch_bounds__(1024, 1)  //
@@ -308,15 +324,24 @@ __global__ void plan_compress_prefill_kernel_1(const Prefill1Params params) {
       const auto raw_loc_0 = mapping[position_0];
       const auto raw_loc_1 = mapping[position_1];
       if (params.compress_ratio == 128) {
-        plan_c.read_page_0 = raw_loc_0 / 128;
-        plan_c.read_page_1 = raw_loc_1 / 128;
+        const auto state_loc_1 =
+            map_dcp_c128_state_loc(raw_loc_1, params.dcp_world_size, params.dcp_rank);
+        if (state_loc_1 < 0) {
+          params.plan_c[idx] = PlanC::invalid();
+        } else {
+          // C128 kernels only consume read_page_1; keep read_page_0 valid for
+          // downstream fused-store validity checks.
+          plan_c.read_page_0 = state_loc_1 / 128;
+          plan_c.read_page_1 = state_loc_1 / 128;
+          params.plan_c[idx] = plan_c;
+        }
       } else {
         const auto state_loc_0 = params.state_map_ptr[raw_loc_0];
         const auto state_loc_1 = params.state_map_ptr[raw_loc_1];
         plan_c.read_page_0 = compute_loc(state_loc_0) / params.compress_ratio;
         plan_c.read_page_1 = compute_loc(state_loc_1) / params.compress_ratio;
+        params.plan_c[idx] = plan_c;
       }
-      params.plan_c[idx] = plan_c;
     }
   } else if (idx < params.num_c_padded) {
     params.plan_c[idx] = PlanC::invalid();
@@ -333,8 +358,16 @@ __global__ void plan_compress_prefill_kernel_1(const Prefill1Params params) {
       const auto position = static_cast<int32_t>(plan_w.write_loc - 1);
       const auto raw_loc = mapping[position];
       plan_w.ragged_id = ragged_id;
-      plan_w.write_loc =
-          params.compress_ratio == 128 ? raw_loc : compute_loc(params.state_map_ptr[raw_loc]);
+      if (params.compress_ratio == 128) {
+        plan_w.write_loc =
+            map_dcp_c128_state_loc(raw_loc, params.dcp_world_size, params.dcp_rank);
+        if (plan_w.write_loc < 0) {
+          params.plan_w[idx] = PlanW::invalid();
+          return;
+        }
+      } else {
+        plan_w.write_loc = compute_loc(params.state_map_ptr[raw_loc]);
+      }
       params.plan_w[idx] = plan_w;
     }
   } else if (idx < params.num_w_padded) {
@@ -357,16 +390,31 @@ __global__ void plan_compress_decode_kernel(const DecodeParams params) {
   const auto position_0 = max(position_1 - params.compress_ratio, 0);
   const auto raw_loc_0 = mapping[position_0];
   const auto raw_loc_1 = mapping[position_1];
-  const auto state_loc_0 =
-      params.compress_ratio == 128 ? raw_loc_0 : params.state_map_ptr[raw_loc_0];
-  const auto state_loc_1 =
-      params.compress_ratio == 128 ? raw_loc_1 : params.state_map_ptr[raw_loc_1];
-  const int32_t write_loc = static_cast<int32_t>(
-      params.compress_ratio == 128 ? state_loc_1 : compute_loc(state_loc_1));
-  const int32_t read_page_0 = static_cast<int32_t>(
-      params.compress_ratio == 128 ? state_loc_0 / 128 : compute_loc(state_loc_0) / params.compress_ratio);
-  const int32_t read_page_1 = static_cast<int32_t>(
-      params.compress_ratio == 128 ? state_loc_1 / 128 : write_loc / params.compress_ratio);
+  int32_t write_loc;
+  int32_t read_page_0;
+  int32_t read_page_1;
+  if (params.compress_ratio == 128) {
+    const auto state_loc_1 =
+        map_dcp_c128_state_loc(raw_loc_1, params.dcp_world_size, params.dcp_rank);
+    if (state_loc_1 < 0) {
+      params.plan_d[idx] = {
+          .seq_len = static_cast<uint32_t>(seq_len),
+          .write_loc = -1,
+          .read_page_0 = -1,
+          .read_page_1 = -1,
+      };
+      return;
+    }
+    write_loc = state_loc_1;
+    read_page_0 = state_loc_1 / 128;
+    read_page_1 = state_loc_1 / 128;
+  } else {
+    const auto state_loc_0 = params.state_map_ptr[raw_loc_0];
+    const auto state_loc_1 = params.state_map_ptr[raw_loc_1];
+    write_loc = static_cast<int32_t>(compute_loc(state_loc_1));
+    read_page_0 = static_cast<int32_t>(compute_loc(state_loc_0) / params.compress_ratio);
+    read_page_1 = static_cast<int32_t>(write_loc / params.compress_ratio);
+  }
   params.plan_d[idx] = {
       .seq_len = static_cast<uint32_t>(seq_len),
       .write_loc = write_loc,
@@ -478,7 +526,9 @@ inline PrefillPlan plan_compress_prefill(
     const int32_t swa_page_size,
     const int32_t ring_size,
     const bool use_cuda_graph,
-    const int32_t active_bs) {
+    const int32_t active_bs,
+    const int32_t dcp_world_size,
+    const int32_t dcp_rank) {
   auto B = SymbolicSize{"batch_size"};
   auto N = SymbolicSize{"num_q_tokens"};
   auto cpu_or_gpu = SymbolicDevice{};
@@ -523,6 +573,8 @@ inline PrefillPlan plan_compress_prefill(
   RuntimeCheck(active_bs >= 0);
   RuntimeCheck(static_cast<uint32_t>(active_bs) <= batch_size);
   RuntimeCheck(static_cast<uint32_t>(active_bs) <= num_q_tokens && num_q_tokens <= kMaxTokens);
+  RuntimeCheck(dcp_world_size >= 1);
+  RuntimeCheck(dcp_rank >= 0 && dcp_rank < dcp_world_size);
   // `swa_page_size` >= `ring_size` >= `compress_ratio`
   RuntimeCheck(swa_page_size % ring_size == 0 && ring_size % compress_ratio == 0);
 
@@ -570,6 +622,8 @@ inline PrefillPlan plan_compress_prefill(
         .swa_page_size = swa_page_size,
         .ring_size = ring_size,
         .compress_ratio = compress_ratio,
+        .dcp_world_size = dcp_world_size,
+        .dcp_rank = dcp_rank,
     };
     const auto block_size_1 = 256;
     const auto num_blocks_1 = div_ceil(params1.num_work, block_size_1);
@@ -647,6 +701,8 @@ inline PrefillPlan plan_compress_prefill(
       .swa_page_size = swa_page_size,
       .ring_size = ring_size,
       .compress_ratio = compress_ratio,
+      .dcp_world_size = dcp_world_size,
+      .dcp_rank = dcp_rank,
   };
   const auto block_size = 256;
   const auto num_blocks = div_ceil(params.num_work, block_size);
@@ -661,7 +717,9 @@ inline tvm::ffi::Tensor plan_compress_decode(
     const tvm::ffi::TensorView seq_lens,          // CPU/GPU
     const int32_t compress_ratio,
     const int32_t swa_page_size,
-    const int32_t ring_size) {
+    const int32_t ring_size,
+    const int32_t dcp_world_size,
+    const int32_t dcp_rank) {
   auto B = SymbolicSize{"batch_size"};
   auto device_ = SymbolicDevice{};
   device_.set_options<kDLCUDA>();
@@ -682,6 +740,8 @@ inline tvm::ffi::Tensor plan_compress_decode(
       .with_dtype<IDX_T>()
       .with_device(device_)
       .verify(seq_lens);
+  RuntimeCheck(dcp_world_size >= 1);
+  RuntimeCheck(dcp_rank >= 0 && dcp_rank < dcp_world_size);
 
   const auto batch_size = static_cast<uint32_t>(B.unwrap());
   const auto device = device_.unwrap();
@@ -697,6 +757,8 @@ inline tvm::ffi::Tensor plan_compress_decode(
       .swa_page_size = swa_page_size,
       .ring_size = ring_size,
       .compress_ratio = compress_ratio,
+      .dcp_world_size = dcp_world_size,
+      .dcp_rank = dcp_rank,
   };
   const auto block_size = 256;
   const auto num_blocks = div_ceil(batch_size, block_size);
