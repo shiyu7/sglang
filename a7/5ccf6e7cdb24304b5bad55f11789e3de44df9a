@@ -1,0 +1,31 @@
+python/sglang/srt/disaggregation/mooncake/conn.py
+  s_96ff7e64acb19a::t_8cdda6b42c1945 311,317,325,329,332,336,363,375,2985,2987,3026-3047
+test/registered/unit/disaggregation/test_mooncake_transfer_control.py
+  s_07527df34a68e2::t_6f3daece382a98 19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a75ccf6e7cdb24304b5bad55f11789e3de44df9a",
+  "prompts": {},
+  "sessions": {
+    "s_07527df34a68e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8a13-9e77-7a91-8bc8-ebdb8b7d0509",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    },
+    "s_96ff7e64acb19a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f934e-a50c-7773-baa6-f1c6cec5bbfe",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
