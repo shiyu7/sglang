@@ -1,0 +1,51 @@
+python/sglang/srt/arg_groups/pd_disaggregation_hook.py
+  s_07527df34a68e2::t_e0b7ea170efada 102-110
+python/sglang/srt/disaggregation/common/conn.py
+  s_07527df34a68e2::t_3d455c447d183c 176-180,182,184-192,202,208-216,796-798,1418
+python/sglang/srt/disaggregation/common/staging_buffer.py
+  s_91e1fffa64e265::t_b24426b8d7b86a 29-30,119-308,398
+python/sglang/srt/disaggregation/common/staging_handler.py
+  s_07527df34a68e2::t_5ec7eebf15b198 94-95,111-113,120-126,128,154-163,180-199,203-210,214-231,253-255,271-283,287-295,300-308,362-366,387-389,397-404,414-425,525-527,535-537,611-615,671,675-676,679-680,683,692-693,695-697,790-792,800-801,820-828,830-837,840-846,848-866,878,885-890,894-900,908-919,931-933,947,963,970-974,984-997,1000-1001
+python/sglang/srt/disaggregation/decode.py
+  s_07527df34a68e2::t_501644f7e20e7e 347-355,1735-1738
+python/sglang/srt/disaggregation/mooncake/conn.py
+  s_07527df34a68e2::t_7f141c67b3fcf2 286-288,561-563,571-582,585-602,617,620-621,624,645-647,653,655,657,659,675-691,694,697-701,708-712,722-743,746,750-765,778-780,782-826,1174-1182,1206-1251,1339-1447,2710-2714,2723,2775-2792,2993-3001,3096-3099,3109,3111-3113,3146-3149,3151-3155,3571-3572
+python/sglang/srt/disaggregation/mooncake/transfer_debug.py
+  s_07527df34a68e2::t_85cbee8fa38de0 111-116,181,193-195
+python/sglang/srt/disaggregation/prefill.py
+  s_07527df34a68e2::t_6eff3c6a58f758 147-151
+python/sglang/srt/environ.py
+  s_07527df34a68e2::t_e32b14f405a8fe 494-497
+python/sglang/srt/managers/scheduler.py
+  s_07527df34a68e2::t_58717e3c29058b 1230-1233
+test/registered/unit/disaggregation/test_dsv4_staging_kernel.py
+  s_07527df34a68e2::t_b415b10e216a0a 1-41
+test/registered/unit/disaggregation/test_dsv4_staging_layout.py
+  s_07527df34a68e2::t_e898448b4031ce 1-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9dec88d8c07c0cc1d21eae0971f60d65bdbb1da4",
+  "prompts": {},
+  "sessions": {
+    "s_07527df34a68e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8a13-9e77-7a91-8bc8-ebdb8b7d0509",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    },
+    "s_91e1fffa64e265": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f923f-f31e-7e33-9eeb-347e86397321",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
