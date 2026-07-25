@@ -1,0 +1,39 @@
+python/sglang/jit_kernel/csrc/deepseek_v4/topk_v1.cuh
+  s_07527df34a68e2::t_f2e9b64ad10f94 1-2,4,33-68,301-379,393-401,462-582
+python/sglang/jit_kernel/dsv4/__init__.py
+  s_07527df34a68e2::t_bd419b94327078 32-38,62-63
+python/sglang/jit_kernel/dsv4/topk.py
+  s_07527df34a68e2::t_dda0404de323f5 22,27-31,69-112
+python/sglang/srt/environ.py
+  s_0216e72bf2b8e4::t_a50d1929ee2b6e 915-921
+python/sglang/srt/layers/attention/dsv4/indexer.py
+  s_07527df34a68e2::t_980a0eac9b1ea4 12-13,562-772,882-902,909-945
+python/sglang/srt/layers/attention/dsv4/metadata.py
+  s_07527df34a68e2::t_89b9efffb4793c 16,101-127,135,138,165-189,220-234,240,246,248-268,270-303,349-354,358-363,366-369
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b069f8fae057e3ff66a2d0e7ce97e6f90d73e733",
+  "prompts": {},
+  "sessions": {
+    "s_0216e72bf2b8e4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f976b-bb55-7041-ae22-c8d628d32380",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    },
+    "s_07527df34a68e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8a13-9e77-7a91-8bc8-ebdb8b7d0509",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
