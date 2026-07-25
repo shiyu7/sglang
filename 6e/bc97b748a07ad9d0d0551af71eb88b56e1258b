@@ -1,0 +1,89 @@
+python/sglang/jit_kernel/csrc/deepseek_v4/c128_online_v2.cuh
+  s_0216e72bf2b8e4::t_a4b12a107efc83 735,750-753,773-774,806-807,924
+python/sglang/jit_kernel/csrc/deepseek_v4/c_plan.cuh
+  s_0216e72bf2b8e4::t_b6b1de3e2cd8f7 45,64,144,161-162,164,189,199-207,216-218,225,238-246,253-255,264-265,291-294,311,479-480,522-524,548,568,590,621,645
+python/sglang/jit_kernel/csrc/deepseek_v4/fused_norm_rope_v2.cuh
+  s_0216e72bf2b8e4::t_d9fcdf86cfa1b6 52-53,61-71,114,121-122,425,432-433,559-561,603-604,618-619
+python/sglang/jit_kernel/csrc/deepseek_v4/online_c128_mtp.cuh
+  s_0216e72bf2b8e4::t_90cbccea94a792 37,91,115,213,231,249-250,269-273,285,402-405
+python/sglang/jit_kernel/dsv4/compress.py
+  s_0216e72bf2b8e4::t_38a3259a21eca0 41-52,70,109,125,237-238,254,294,349,374,459,470-471
+python/sglang/jit_kernel/dsv4/elementwise.py
+  s_0216e72bf2b8e4::t_dba863da16c34e 69-72,74
+python/sglang/jit_kernel/dsv4/online_c128_mtp.py
+  s_0216e72bf2b8e4::t_f5b539991d24e7 25,115-117,120,183
+python/sglang/kernels/ops/attention/dsa/index_buf_accessor.py
+  s_0216e72bf2b8e4::t_11ae75ec112191 262,271,281,328-335,347,355,364,372,375-377
+python/sglang/kernels/ops/attention/dsv4/index_buf_accessor.py
+  s_0216e72bf2b8e4::t_eec945b330f2f4 36-54,57-67,71-89,97-99,133-140,154,172-174,184,202-204,207-210,213-222
+python/sglang/srt/arg_groups/deepseek_v4_hook.py
+  s_0216e72bf2b8e4::t_93b3d2a0f6e56d 65-109
+python/sglang/srt/distributed/parallel_state.py
+  s_0216e72bf2b8e4::t_00d18c8f89ac40 1750,2537-2539,2542-2545,2548-2550
+python/sglang/srt/environ.py
+  s_0216e72bf2b8e4::t_619a180287f8fa 910-914
+python/sglang/srt/layers/attention/base_attn_backend.py
+  s_0216e72bf2b8e4::t_6997735b7c80f5 141-144
+python/sglang/srt/layers/attention/deepseek_v4_backend.py
+  s_0216e72bf2b8e4::t_5b2702ef6ff023 36-40,59,98-108,199-201,246-248,274-276,329,333-397,408-410,431-432,439-441,534,548,660-666,729,750,914,946,954,1093,1118,1214-1225,1347-1350,1355,1432,1439,1468,1670-1689,1746-1747,1755-1756,1828-1832,1837-1854,1897,1908,1915,1930-1985,2150,2160-2172,2244,2339-2348
+python/sglang/srt/layers/attention/deepseek_v4_backend_hip_radix.py
+  s_0216e72bf2b8e4::t_8adb39a49b820d 1378-1379,1387-1388
+python/sglang/srt/layers/attention/dsv4/compressor.py
+  s_07527df34a68e2::t_815f6feaae7503 185,189-191,220,231
+python/sglang/srt/layers/attention/dsv4/compressor_v2.py
+  s_07527df34a68e2::t_2b5141a573f11d 29-307,499-503,509,565,572,574,593-599,608,614,618,637-639,641,645,649,651-653,665-666,673-674,684-685,689-695,720,740,773,800,827
+python/sglang/srt/layers/attention/dsv4/indexer.py
+  s_07527df34a68e2::t_ef669926c51b1d 46
+python/sglang/srt/layers/attention/dsv4/metadata.py
+  s_07527df34a68e2::t_7f209f4df1c2eb 15-60,130-133,220-236
+python/sglang/srt/mem_cache/allocator/__init__.py
+  s_07527df34a68e2::t_1fa8769892d51b 4,13
+python/sglang/srt/mem_cache/allocator/dcp.py
+  s_07527df34a68e2::t_f410a8be7682c4 1-136
+python/sglang/srt/mem_cache/allocator/swa.py
+  s_07527df34a68e2::t_80a42084407bc6 4,33-34,62-78,80-99,372-377
+python/sglang/srt/mem_cache/deepseek_v4_memory_pool.py
+  s_07527df34a68e2::t_12f8715b3a65cd 25,132-134,141-143,160-187,203-320,385-387,390-397,408-426,488-523,563-565,569-574,608-685,786-787,800-802,808-810,824-828,851,988-1111,1362,1453-1462,1470-1472,1517-1543,1549,1551-1555,1557-1562,1581-1582,1584,1588-1593,1630-1631,1635-1637,1639-1643,1663-1664,1666-1672,1674-1679,1691-1692,1694-1705,1719-1720,1722-1737,1754-1755,1757-1759,1761-1771,1779-1780,1784-1796,1808-1994
+python/sglang/srt/model_executor/forward_batch_info.py
+  s_07527df34a68e2::t_8870a649bc259f 646-656,913-938,1431-1432,1532-1533
+python/sglang/srt/model_executor/pool_configurator.py
+  s_07527df34a68e2::t_fa2f53d8f9c902 58,522,669,675-676,728,738
+python/sglang/srt/models/deepseek_v4.py
+  s_07527df34a68e2::t_63667a4482fb6e 41,196,347,349-350,366,703-704,1175-1197,1209,1215,1219,1231,1242,1246-1252
+python/sglang/srt/server_args.py
+  s_07527df34a68e2::t_0b7416e14bdec7 3098-3100,3109,3111-3116,7370-7393
+python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+  s_07527df34a68e2::t_485409551a24b1 74,193-197,270,369-373,449,520,552-553,618-622,650-651,672-696,706-707
+python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py
+  s_07527df34a68e2::t_07b03ced171a82 76,198-202,275,356-360,421,526-527,561-567,628-632
+python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
+  s_07527df34a68e2::t_54f05940f65467 109,250-254,327,444-448,599-603,638,685-690
+python/sglang/srt/speculative/spec_utils.py
+  s_07527df34a68e2::t_3a402ecf39654c 653-663
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6ebc97b748a07ad9d0d0551af71eb88b56e1258b",
+  "prompts": {},
+  "sessions": {
+    "s_0216e72bf2b8e4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f976b-bb55-7041-ae22-c8d628d32380",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    },
+    "s_07527df34a68e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8a13-9e77-7a91-8bc8-ebdb8b7d0509",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
