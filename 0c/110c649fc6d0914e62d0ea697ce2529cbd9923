@@ -1,0 +1,23 @@
+python/sglang/srt/environ.py
+  s_07527df34a68e2::t_9555f2cca44188 1009-1018,1020-1021
+test/registered/unit/disaggregation/test_pcp_dcp_rank_affinity.py
+  s_07527df34a68e2::t_7ab2b4c5ca6ed5 80-94
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0c110c649fc6d0914e62d0ea697ce2529cbd9923",
+  "prompts": {},
+  "sessions": {
+    "s_07527df34a68e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8a13-9e77-7a91-8bc8-ebdb8b7d0509",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
