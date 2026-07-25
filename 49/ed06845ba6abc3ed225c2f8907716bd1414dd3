@@ -1,0 +1,35 @@
+python/sglang/srt/disaggregation/common/utils.py
+  s_0216e72bf2b8e4::t_5be869fe464b47 41
+python/sglang/srt/disaggregation/mooncake/conn.py
+  s_0216e72bf2b8e4::t_340ffcbf104796 42-44,237,254-261,698-703,858-888,894-898,1976,2570-2571,2573-2588,2606-2607,2610-2618,2651-2657,2920-2930,2964-2969,2983-2988,3003-3007,3016-3019,3022-3026,3032-3035,3073-3078,3113-3118,3120-3125,3427-3446
+python/sglang/srt/disaggregation/mooncake/transfer_debug.py
+  s_0216e72bf2b8e4::t_d1753240e0e54b 1-202
+python/sglang/srt/environ.py
+  s_07527df34a68e2::t_dfde368a7f67dd 366-368
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "49ed06845ba6abc3ed225c2f8907716bd1414dd3",
+  "prompts": {},
+  "sessions": {
+    "s_0216e72bf2b8e4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f976b-bb55-7041-ae22-c8d628d32380",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    },
+    "s_07527df34a68e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8a13-9e77-7a91-8bc8-ebdb8b7d0509",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
