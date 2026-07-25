@@ -1,0 +1,23 @@
+python/sglang/srt/disaggregation/common/conn.py
+  s_0216e72bf2b8e4::t_484eb414b59e4b 176-178,180,338-358,364-365,369-370,628-629,738-739,743-744,748-749,753,758
+test/registered/unit/disaggregation/test_pcp_dcp_rank_affinity.py
+  s_0216e72bf2b8e4::t_263ffad2892982 3,14,58-78,80,90-151,171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9835e0de6b66f3ef573af9b47bae5b046cee8ac6",
+  "prompts": {},
+  "sessions": {
+    "s_0216e72bf2b8e4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f976b-bb55-7041-ae22-c8d628d32380",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

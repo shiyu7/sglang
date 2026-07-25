@@ -1,0 +1,23 @@
+python/sglang/srt/disaggregation/mooncake/conn.py
+  s_07527df34a68e2::t_86f025967ff416 72-97,774,784-785,2156-2157,2165-2166,2669-2670,2675-2676,3202-3203,3207-3208,3355-3358,3606,3744
+test/registered/unit/disaggregation/test_mooncake_control_messages.py
+  s_07527df34a68e2::t_bd6999aaad0a13 1-86
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c566b65d33daed8f4832c15db6a0906a03f640af",
+  "prompts": {},
+  "sessions": {
+    "s_07527df34a68e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8a13-9e77-7a91-8bc8-ebdb8b7d0509",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

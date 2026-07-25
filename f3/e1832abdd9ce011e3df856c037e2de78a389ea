@@ -1,0 +1,25 @@
+python/sglang/srt/mem_cache/kv_cache_configurator.py
+  s_8c7fc52be9a445::t_5d4030e56155bf 840-850,899-903,928-957
+python/sglang/srt/model_executor/pool_configurator.py
+  s_8c7fc52be9a445::t_492c5340a7b567 552,566-567,586-589,597-608,640,669-679,687-691,804-808
+test/registered/unit/model_executor/test_pool_configurator.py
+  s_8c7fc52be9a445::t_8a1cd1afcfc42f 16,548-656
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f3e1832abdd9ce011e3df856c037e2de78a389ea",
+  "prompts": {},
+  "sessions": {
+    "s_8c7fc52be9a445": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8ddb-14f2-7030-9b46-5fba030f9893",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

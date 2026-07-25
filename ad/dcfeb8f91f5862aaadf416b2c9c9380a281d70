@@ -1,0 +1,23 @@
+python/sglang/srt/mem_cache/common.py
+  s_07527df34a68e2::t_6096108ae5447e 35-41
+python/sglang/srt/mem_cache/deepseek_v4_memory_pool.py
+  s_07527df34a68e2::t_429ad1ee3448f2 174
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "addcfeb8f91f5862aaadf416b2c9c9380a281d70",
+  "prompts": {},
+  "sessions": {
+    "s_07527df34a68e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8a13-9e77-7a91-8bc8-ebdb8b7d0509",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
