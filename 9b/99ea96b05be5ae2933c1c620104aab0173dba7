@@ -1,0 +1,57 @@
+DeepSeekV4_C4_Indexer_Summary.md
+  s_0216e72bf2b8e4::t_d60850d3d060f2 1-849
+python/sglang/test/run_eval.py
+  s_0216e72bf2b8e4::t_aabefd1e11d2c8 263-267
+scripts/playground/dcp_equivalence_check.py
+  s_0216e72bf2b8e4::t_d4056866881e43 1-541
+scripts/playground/dcp_equivalence_run.sh
+  s_0216e72bf2b8e4::t_bffed8ec12566a 1-156
+test/manual/dsv4/analyze_dcp_decode_trace.py
+  s_0216e72bf2b8e4::t_13f3e047759a02 1-397
+test/manual/dsv4/bench_dcp_c4_indexer.py
+  s_0216e72bf2b8e4::t_abf84e1e04e8d6 1-1032
+test/manual/dsv4/bench_dcp_fixed_batch_decode.py
+  s_0216e72bf2b8e4::t_994e09bb67fc1d 1-224
+test/manual/dsv4/bench_dcp_lse_merge.py
+  s_0216e72bf2b8e4::t_d0b3f5042cff72 1-544
+test/manual/dsv4/run_dsv4_dcp_e2e_ab.py
+  s_0216e72bf2b8e4::t_0bdddee6314a76 1-331
+test/registered/attention/unittests/dsv4/test_deepseek_v4.py
+  s_0216e72bf2b8e4::t_29412385ea0222 501-647
+test/registered/jit/test_dsv4_dcp_topk.py
+  s_0216e72bf2b8e4::t_1419553ddb5dc8 1-174
+test/registered/unit/disaggregation/test_cp_transfer_position_offset.py
+  s_0216e72bf2b8e4::t_2b9d5fe39aad8d 1-97
+test/registered/unit/disaggregation/test_mooncake_control_messages.py
+  s_0216e72bf2b8e4::t_3358c7ecfdc127 1-86
+test/registered/unit/disaggregation/test_mooncake_transfer_control.py
+  s_0216e72bf2b8e4::t_137e9a236f6f01 1-71
+test/registered/unit/disaggregation/test_pcp_dcp_rank_affinity.py
+  s_0216e72bf2b8e4::t_a05536ca82bba7 1-294
+test/registered/unit/layers/test_dsv4_nonpaged_indexer.py
+  s_0216e72bf2b8e4::t_1a323271a7bed3 10-13,25-75
+test/registered/unit/managers/test_tokenizer_manager_batch_routing.py
+  s_0216e72bf2b8e4::t_be31e54fe5f380 1-91
+test/registered/unit/model_executor/test_pool_configurator.py
+  s_0216e72bf2b8e4::t_0ffa44d5f47e79 16,548-656
+test/registered/unit/spec/test_eagle_draft_cuda_graph_runner.py
+  s_0216e72bf2b8e4::t_cebf8a9a4e417a 57,79,172-185
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9b99ea96b05be5ae2933c1c620104aab0173dba7",
+  "prompts": {},
+  "sessions": {
+    "s_0216e72bf2b8e4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f976b-bb55-7041-ae22-c8d628d32380",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
