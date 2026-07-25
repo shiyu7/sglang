@@ -1,0 +1,25 @@
+python/sglang/kernels/ops/attention/utils.py
+  s_0216e72bf2b8e4::t_2489bbd5e463dc 51,188-512
+python/sglang/srt/environ.py
+  s_0216e72bf2b8e4::t_1247e90ccc9673 922-932
+python/sglang/srt/layers/attention/deepseek_v4_backend.py
+  s_0216e72bf2b8e4::t_eb2669eb922cc3 59-63,1989-2027
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0b2ceb3e085b364e31b05ce6cd87ea192ddcc7d2",
+  "prompts": {},
+  "sessions": {
+    "s_0216e72bf2b8e4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f976b-bb55-7041-ae22-c8d628d32380",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
