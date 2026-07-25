@@ -1,0 +1,25 @@
+python/sglang/srt/models/deepseek_v4.py
+  s_0216e72bf2b8e4::t_a7d33bc37df6bc 2338-2352
+test/registered/unit/disaggregation/test_mooncake_transfer_control.py
+  s_0216e72bf2b8e4::t_7363f7989a0f2f 40-41,64-65
+test/registered/unit/managers/test_tokenizer_manager_batch_routing.py
+  s_0216e72bf2b8e4::t_624492ca9c8b71 71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7731c2d5053c570c176e3220fecf7c3494402ce8",
+  "prompts": {},
+  "sessions": {
+    "s_0216e72bf2b8e4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f976b-bb55-7041-ae22-c8d628d32380",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
