@@ -1,0 +1,40 @@
+python/sglang/srt/disaggregation/mooncake/conn.py
+  s_07527df34a68e2::t_207626b2f2cce8 866,869,876-877,887,890
+  s_07527df34a68e2::t_d4ac828e884f58 299,774,782-783,786-798,813,816,819,846,906,1255-1290,2811-2815,3295,3458,3492
+python/sglang/srt/disaggregation/common/conn.py
+  s_07527df34a68e2::t_201ecc978c5c90 176,188,812,1434
+python/sglang/srt/disaggregation/common/staging_handler.py
+  s_0216e72bf2b8e4::t_f62e9ac68da520 109,116-118,120,146,163-166,170,174-177,206,218,303-312,421,502,561,564,567,669-670,696,698-703,706-709,711-729,741-743,753-755,763-773,785,814,830-838
+python/sglang/srt/disaggregation/decode.py
+  s_0216e72bf2b8e4::t_79646ca4ba5929 392-393,2302
+python/sglang/srt/disaggregation/prefill.py
+  s_0216e72bf2b8e4::t_5619e247d544a4 233
+python/sglang/srt/managers/scheduler.py
+  s_0216e72bf2b8e4::t_4a4bbda7ad7937 1230
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e60e13684961eefc3131ebd5fae480aab0f11a0a",
+  "prompts": {},
+  "sessions": {
+    "s_0216e72bf2b8e4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f976b-bb55-7041-ae22-c8d628d32380",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    },
+    "s_07527df34a68e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8a13-9e77-7a91-8bc8-ebdb8b7d0509",
+        "model": "unknown"
+      },
+      "human_author": "shiyu7 <shiyu_1995@163.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
