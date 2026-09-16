@@ -977,21 +977,27 @@ class Engram(nn.Module):
         cp_all_tokens: bool = False,
     ) -> torch.Tensor:
         """x [T, hc_mult, dim]; hash_ids [T, n_hash_cols] for this layer."""
-        # The lookup runs first even for an idle DP-attention batch: under DP
-        # attention it is a collective every rank has to join.
+        # The lookup runs first even for an idle DP-attention batch: a sharded
+        # table uses a collective every rank has to join, while a shared table
+        # returns an empty local result without communication.
         emb = self.embed(hash_ids, forward_batch, cp_all_tokens=cp_all_tokens)
         if x.shape[0] == 0:
             # Nothing to gate, and the MXFP8 quantize behind wkv rejects an
             # empty M.
             return x
-        kv, _ = self.wkv(emb.flatten(-2))
-        return self.apply_gate(x, kv)
+        return self.apply_gate(x, self.project_from_embeddings(emb))
+
+    def project_from_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Project already-gathered BF16 embeddings on the current stream."""
+        kv, _ = self.wkv(embeddings.flatten(-2))
+        return kv
 
     def project(
         self, hash_ids: torch.Tensor, *, cp_all_tokens: bool = False
     ) -> torch.Tensor:
-        kv, _ = self.wkv(self.embed(hash_ids, cp_all_tokens=cp_all_tokens).flatten(-2))
-        return kv
+        return self.project_from_embeddings(
+            self.embed(hash_ids, cp_all_tokens=cp_all_tokens)
+        )
 
     def apply_gate(self, x: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
         return engram_gate(

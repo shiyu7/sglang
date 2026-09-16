@@ -1502,6 +1502,10 @@ class Envs:
     # Keep the DeepSeek-V4.1 engram tables in host memory (layout below) and gather
     # rows from the GPU instead of sharding them over HBM.
     SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE = EnvBool(False)
+    # Overlap layer 14's shared-host embedding lookup with earlier layers. The
+    # WKV projection stays on the main stream so this path works on Hopper and
+    # with DP attention without introducing a side-stream collective or GEMM.
+    SGLANG_ENABLE_DSV41_ENGRAM_EMBED_PREFETCH = EnvBool(False)
     # Overlap layer 14's shared-host lookup and WKV with earlier layers at BS=1.
     SGLANG_ENABLE_DSV41_ENGRAM_KV_PREFETCH = EnvBool(False)
     # Pin and map the host table with cudaHostRegister. False leaves the plain
