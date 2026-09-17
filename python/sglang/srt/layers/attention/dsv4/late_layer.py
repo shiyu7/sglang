@@ -53,7 +53,6 @@ class LateLayerDPLayout:
     counts_gpu: torch.Tensor
     padding_mode: DpPaddingMode
     num_token_non_padded: Optional[torch.Tensor]
-    num_token_non_padded_cpu: Optional[int]
 
     @classmethod
     def prepare(cls, input_ids: torch.Tensor, batch: ForwardBatch) -> LateLayerDPLayout:
@@ -105,7 +104,6 @@ class LateLayerDPLayout:
         if batch.dp_padding_mode.is_max_len():
             counts = [max(counts)] * len(counts)
         non_padded = batch.num_token_non_padded
-        non_padded_cpu = batch.num_token_non_padded_cpu
         return cls(
             local_rows=local_rows,
             dp_rank=dp_rank,
@@ -114,9 +112,6 @@ class LateLayerDPLayout:
             padding_mode=batch.dp_padding_mode,
             num_token_non_padded=(
                 non_padded.clamp(max=local_rows) if non_padded is not None else None
-            ),
-            num_token_non_padded_cpu=(
-                min(non_padded_cpu, local_rows) if non_padded_cpu is not None else None
             ),
         )
 
@@ -154,8 +149,9 @@ class LateLayerDPLayout:
             dp_padding_mode=self.padding_mode,
             dp_local_start_pos=None,
             dp_local_num_tokens=None,
+            # Only the local MoE mask changes. ForwardBatch's global token
+            # counts belong to attention/graph metadata and stay invariant.
             num_token_non_padded=self.num_token_non_padded,
-            num_token_non_padded_cpu=self.num_token_non_padded_cpu,
         )
         saved = {name: getattr(batch, name) for name in updates}
         try:

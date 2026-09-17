@@ -18,6 +18,7 @@ from sglang.srt.layers.attention.dsv4.late_layer import (
     scatter_tail_rows,
     select_tail_rows,
 )
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -25,7 +26,16 @@ register_cpu_ci(est_time=30, suite="base-a-test-cpu")
 
 
 def _batch(dp_size, rank, mode, non_padded=512):
-    return SimpleNamespace(
+    # Use the real schema: the removed local CPU count must not be reintroduced
+    # by a permissive mock (the global CPU/GPU counts are attention metadata).
+    return ForwardBatch(
+        forward_mode=ForwardMode.EXTEND,
+        batch_size=1,
+        input_ids=torch.zeros(512, dtype=torch.int64),
+        req_pool_indices=torch.tensor([rank]),
+        seq_lens=torch.tensor([non_padded]),
+        out_cache_loc=torch.zeros(512, dtype=torch.int64),
+        seq_lens_sum=non_padded,
         global_num_tokens_cpu=[512] * dp_size,
         global_num_tokens_gpu=torch.full((dp_size,), 512, dtype=torch.int64),
         global_dp_buffer_len=512 * dp_size,
@@ -33,11 +43,43 @@ def _batch(dp_size, rank, mode, non_padded=512):
         dp_local_start_pos=torch.tensor(rank * 512),
         dp_local_num_tokens=torch.tensor(512),
         num_token_non_padded=torch.tensor(non_padded, dtype=torch.int32),
-        num_token_non_padded_cpu=non_padded,
+        global_num_token_non_padded=torch.tensor(non_padded, dtype=torch.int32),
+        global_num_token_non_padded_cpu=non_padded,
     )
 
 
 class TestLateLayerRows(CustomTestCase):
+    def test_local_mask_clamped_without_changing_global_non_padded_counts(self):
+        for mode in (dp.DpPaddingMode.MAX_LEN, dp.DpPaddingMode.SUM_LEN):
+            for n, non_padded in ((0, 0), (1, 1), (129, 512), (129, None)):
+                with self.subTest(mode=mode, rows=n, non_padded=non_padded):
+                    batch = _batch(2, 0, mode)
+                    batch.num_token_non_padded = (
+                        torch.tensor(non_padded, dtype=torch.int32)
+                        if non_padded is not None
+                        else None
+                    )
+                    old = vars(batch).copy()
+                    layout = LateLayerDPLayout.from_counts(
+                        [n, 7], dp_rank=0, attn_tp_size=2, batch=batch, device="cpu"
+                    )
+                    with layout.activate(batch):
+                        if non_padded is None:
+                            self.assertIsNone(batch.num_token_non_padded)
+                        else:
+                            self.assertEqual(
+                                batch.num_token_non_padded.item(), min(n, non_padded)
+                            )
+                        # Assert during the temporary layout, not just after
+                        # restoration: these global counters must never change.
+                        for name in (
+                            "global_num_token_non_padded",
+                            "global_num_token_non_padded_cpu",
+                        ):
+                            self.assertIs(getattr(batch, name), old[name])
+                    for name, value in old.items():
+                        self.assertIs(getattr(batch, name), value, name)
+
     def test_model_forward_pads_only_moe_and_restores_residual_rows(self):
         from sglang.srt.models.deepseek_v4 import DeepseekV4DecoderLayer
 
@@ -163,7 +205,7 @@ class TestLateLayerRows(CustomTestCase):
             [129, 0], dp_rank=1, attn_tp_size=2, batch=batch, device="cpu"
         )
         self.assertEqual(layout.counts, [130, 130])
-        self.assertEqual(layout.num_token_non_padded_cpu, 0)
+        self.assertEqual(layout.num_token_non_padded.item(), 0)
         with dp.dp_buffer_size_scope(
             1024, 512, True, old["global_num_tokens_cpu"], old["global_num_tokens_gpu"]
         ):
