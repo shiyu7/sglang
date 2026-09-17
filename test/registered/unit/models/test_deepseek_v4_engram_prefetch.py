@@ -147,6 +147,8 @@ class TestDeepseekV4EngramPrefetch(CustomTestCase):
         tail=None,
         cp=False,
         dp_layout=None,
+        attn_dp_size=1,
+        input_ids_global=None,
     ):
         hidden = torch.arange(ids.numel() * 4, dtype=torch.float32).reshape(-1, 2, 2)
         batch = SimpleNamespace(
@@ -166,7 +168,7 @@ class TestDeepseekV4EngramPrefetch(CustomTestCase):
                 deepseek_v4,
                 "get_parallel",
                 return_value=SimpleNamespace(
-                    attn_dp_size=8 if dp_layout is not None else 1,
+                    attn_dp_size=8 if dp_layout is not None else attn_dp_size,
                     attn_cp_rank=1,
                     attn_cp_size=2,
                 ),
@@ -205,7 +207,9 @@ class TestDeepseekV4EngramPrefetch(CustomTestCase):
                 hidden_states=hidden,
                 forward_batch=batch,
                 input_ids=ids[1::2] if cp else ids,
-                input_ids_global=ids,
+                input_ids_global=(
+                    ids if input_ids_global is None else input_ids_global
+                ),
                 capture_dspark=False,
                 dspark_aux_hidden_states=[],
             )
@@ -529,6 +533,44 @@ class TestDeepseekV4EngramPrefetch(CustomTestCase):
                         )
                     else:
                         model.layers[layer_id].engram.embed.prefetch.assert_not_called()
+
+    def test_dp_decode_and_verify_prefetch_only_rank_local_ids(self):
+        # Global MoE routing IDs must never replace this attention rank's
+        # embedding lookup IDs, including unequal and empty local batches.
+        for mode, width in ((ForwardMode.DECODE, 1), (ForwardMode.TARGET_VERIFY, 6)):
+            for capture in (False, True):
+                local_ids = [
+                    (torch.arange(requests * width) + rank * 5 + 1) % 16
+                    for rank, requests in enumerate((0, 1, 3, 0, 2, 0, 1, 0))
+                ]
+                global_ids = torch.cat(local_ids)
+                for rank, ids in enumerate(local_ids):
+                    with self.subTest(mode=mode, capture=capture, rank=rank):
+                        model = self._make_model()
+                        kwargs = dict(
+                            mode=mode,
+                            capture=capture,
+                            attn_dp_size=8,
+                            input_ids_global=global_ids,
+                        )
+                        _, actual, stream = self._forward(model, ids, **kwargs)
+                        _, expected, _ = self._forward(
+                            self._make_model(enabled=False), ids, **kwargs
+                        )
+                        torch.testing.assert_close(actual, expected)
+                        self.assertEqual(actual.shape[0], ids.numel())
+                        for layer_id, divisor in ((1, 3), (14, 5)):
+                            engram = model.layers[layer_id].engram
+                            if ids.numel():
+                                torch.testing.assert_close(
+                                    engram.embed.prefetch.call_args.args[0],
+                                    (ids % divisor)[:, None],
+                                )
+                                self.assertEqual(engram.sync_calls, 0)
+                            else:
+                                engram.embed.prefetch.assert_not_called()
+                        if not ids.numel():
+                            stream.wait_event.assert_not_called()
 
     def test_padded_idle_hashes_do_not_touch_history(self):
         hasher = EngramHasher.__new__(EngramHasher)
