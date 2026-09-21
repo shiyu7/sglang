@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
@@ -255,7 +256,13 @@ def cast_e2m1fn_to_e4m3fn(
 
 
 class Fp8Config(QuantizationConfig):
-    """Config class for FP8."""
+    """Config class for FP8.
+
+    Checkpoints may set ``moe_weight_block_size`` independently of
+    ``weight_block_size``, e.g. [128, 128] routed experts with [32, 32]
+    attention/shared experts. The stored weights and scales must already match
+    those layouts; this setting does not requantize them.
+    """
 
     def __init__(
         self,
@@ -268,6 +275,7 @@ class Fp8Config(QuantizationConfig):
         is_fp4_experts: bool = False,
         kv_cache_quant_algo: Optional[str] = None,
         scale_fmt: Optional[str] = None,
+        moe_weight_block_size: Optional[List[int]] = None,
     ) -> None:
         super().__init__()
         # DSV4 mxfp4-packed (True) vs converted FP8 (False); injected by
@@ -314,6 +322,39 @@ class Fp8Config(QuantizationConfig):
             elif weight_block_size != [1, 32]:
                 raise ValueError("MXFP8 requires weight_block_size=[1, 32].")
         self.weight_block_size = weight_block_size
+        # Only routed experts use this override. Attention and unfused shared
+        # experts continue to use weight_block_size.
+        if moe_weight_block_size is not None:
+            if (
+                not isinstance(moe_weight_block_size, (list, tuple))
+                or len(moe_weight_block_size) != 2
+                or any(
+                    type(size) is not int or size <= 0 for size in moe_weight_block_size
+                )
+            ):
+                raise ValueError(
+                    "moe_weight_block_size must contain two positive integers."
+                )
+            if (
+                not is_checkpoint_fp8_serialized
+                or weight_block_size is None
+                or activation_scheme != "dynamic"
+                or use_mxfp8
+                or is_fp4_experts
+            ):
+                raise ValueError(
+                    "moe_weight_block_size requires a dynamic block-FP8 checkpoint "
+                    "with FP8 experts (not MXFP8 or MXFP4)."
+                )
+        self.moe_weight_block_size = (
+            list(moe_weight_block_size) if moe_weight_block_size is not None else None
+        )
+
+    def can_fuse_shared_expert(self) -> bool:
+        return (
+            self.moe_weight_block_size is None
+            or self.moe_weight_block_size == self.weight_block_size
+        )
 
     def get_name(self) -> str:
         return "mxfp8" if self.use_mxfp8 else "fp8"
@@ -380,6 +421,9 @@ class Fp8Config(QuantizationConfig):
             use_mxfp8=use_mxfp8,
             kv_cache_quant_algo=kv_cache_quant_algo,
             scale_fmt=scale_fmt,
+            moe_weight_block_size=cls.get_from_keys_or(
+                config, ["moe_weight_block_size"], None
+            ),
         )
 
     def get_quant_method(
@@ -416,7 +460,23 @@ class Fp8Config(QuantizationConfig):
 
                 return NPUMXFP8OnlineMoEMethod(self)
 
-            fp8_method = Fp8MoEMethod(self)
+            moe_config = self
+            if self.moe_weight_block_size is not None:
+                # The loader can inject is_fp4_experts after config construction.
+                if self.is_fp4_experts:
+                    raise ValueError(
+                        "moe_weight_block_size requires FP8 expert weights."
+                    )
+                if not self.can_fuse_shared_expert() and layer.num_fused_shared_experts:
+                    raise ValueError(
+                        "Different routed/shared FP8 block sizes require "
+                        "--disable-shared-experts-fusion."
+                    )
+                # Preserve loader-injected settings without changing the config
+                # used by dense layers and shared experts.
+                moe_config = copy.copy(self)
+                moe_config.weight_block_size = list(self.moe_weight_block_size)
+            fp8_method = Fp8MoEMethod(moe_config)
 
             if self.is_fp4_experts and self.dequant_fp4_to_fp8:
                 assert get_moe_runner_backend().is_auto(), (

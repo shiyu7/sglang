@@ -5072,8 +5072,9 @@ class DeepseekV4ForCausalLM(nn.Module):
         # --enforce-shared-experts-fusion is specified
         if quant_blocks_shared_experts_fusion(quant_config):
             return (
-                "Quantization keeps shared experts at a higher precision than the "
-                "routed experts, so they cannot be fused into the quantized "
+                "Quantization keeps shared experts at a higher precision or uses "
+                "a different block layout from routed experts, so they cannot "
+                "be fused into the quantized "
                 "routed-expert path."
             )
         if get_parallel().moe_ep_size > 1 and not uses_per_rank_fused_shared_slots():

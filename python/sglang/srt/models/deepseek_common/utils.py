@@ -160,9 +160,7 @@ def is_wint4afp8_or_wint4a16_config(
 def quant_blocks_shared_experts_fusion(
     quant_config: Optional[QuantizationConfig],
 ) -> bool:
-    """Whether the quantization keeps shared experts at a higher precision than
-    the routed experts, which would require shared expert fusion to be disabled.
-    """
+    """Whether shared and routed experts have incompatible quantization layouts."""
     can_fuse_fn = getattr(quant_config, "can_fuse_shared_expert", None)
     return can_fuse_fn is not None and not can_fuse_fn()
 

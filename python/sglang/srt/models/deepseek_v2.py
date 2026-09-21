@@ -3169,8 +3169,9 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
         # --enforce-shared-experts-fusion is specified
         if quant_blocks_shared_experts_fusion(quant_config):
             return (
-                "Quantization keeps shared experts at a higher precision than the "
-                "routed experts, so they cannot be fused into the quantized "
+                "Quantization keeps shared experts at a higher precision or uses "
+                "a different block layout from routed experts, so they cannot "
+                "be fused into the quantized "
                 "routed-expert path."
             )
         if get_exec().moe.enforce_shared_experts_fusion:
