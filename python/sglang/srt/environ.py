@@ -1497,9 +1497,10 @@ class Envs:
 
     # Kernels and indexer
     SGLANG_OPT_DEEPGEMM_HC_PRENORM = EnvBool(True)
-    # Experimental H20/Hopper V4.1 mix-statistics reduction + Sinkhorn fusion.
-    # Extends the existing one-row SM90 path to BF16 HC=4, H=5120,
-    # 2..256 local query rows (DSPARK block=5 uses six rows per request).
+    # Experimental H20/Hopper V4.1 projection scheduling + reduce/Sinkhorn fusion.
+    # Uses single-stage projection for BF16 HC=4, H=5120, 1..256 local rows;
+    # extends fused reduction beyond the default one-row SM90 path.
+    # DSPARK block=5 uses six query rows per request.
     SGLANG_OPT_DSV41_SM90_FUSED_MHC = EnvBool(False)
     SGLANG_OPT_USE_TILELANG_MHC_PRE = EnvBool(True)
     SGLANG_OPT_USE_TILELANG_MHC_POST = EnvBool(True)

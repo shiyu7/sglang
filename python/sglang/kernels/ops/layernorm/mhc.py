@@ -2299,11 +2299,14 @@ def hc_mix_stats_sinkhorn(
     sinkhorn_iters: int,
     rms_eps: float,
     hc_eps: float,
+    *,
+    sm90_decode: bool = False,
 ):
     """Fuse the reduce and sinkhorn stages of hc_mix_stats followed by hc_split_sinkhorn.
 
     The split-K kernel fixes the reduction order; sinkhorn uses the Triton port's
-    transcendental lowering, which differs from TileLang.
+    transcendental lowering, which differs from TileLang. The SM90 decode
+    schedule only changes pipelining, preserving projection arithmetic.
     """
     assert x_flat.dim() == 2 and hc_fn.dim() == 2
     assert x_flat.stride(1) == 1 and hc_fn.stride(1) == 1
@@ -2339,7 +2342,9 @@ def hc_mix_stats_sinkhorn(
         BLOCK_K=_HC_MIX_BLOCK_K,
         DOT_PRECISION=_HC_MIX_DOT_PRECISION,
         num_warps=_HC_MIX_NUM_WARPS,
-        num_stages=_num_stages_for(m, k),
+        # Four K tiles per slice: extra staging saturates L1/TEX on H20.
+        # A single stage keeps the dot/reduction order and avoids that traffic.
+        num_stages=1 if sm90_decode else _num_stages_for(m, k),
     )
     _hc_mix_reduce_sinkhorn_kernel[(m,)](
         part_mix,

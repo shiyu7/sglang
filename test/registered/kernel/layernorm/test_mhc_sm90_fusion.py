@@ -58,12 +58,24 @@ class TestMhcSm90Fusion(CustomTestCase):
     def test_decode_and_verify_shapes(self):
         # Includes empty/IDLE, draft, uneven per-DP batches, DSPARK block=5,
         # max-running-requests=256 / DP8 -> 192 VERIFY rows, and cap fallback.
-        for m in (0, 1, 2, 6, 12, 18, 24, 30, 36, 42, 48, 96, 192, 256, 257):
+        for m in (0, 1, 2, 6, 12, 18, 24, 30, 36, 42, 48, 96, 180, 192, 256, 257):
             with self.subTest(rows=m):
                 args = self.inputs(m)
                 self.assert_coefficients(
                     self.run_stats(args, True), self.run_stats(args, False)
                 )
+
+    def test_projection_schedule_is_bitwise(self):
+        # Scheduling must not change split-K partials or coefficient arithmetic.
+        for m in (1, 6, 36, 180, 192, 256):
+            for strided in (False, True):
+                with self.subTest(rows=m, strided=strided):
+                    x, fn, scale, base = self.inputs(m, strided=strided)
+                    args = (x.flatten(1), fn, scale, base, 4, 20, 1e-6, 1e-6)
+                    expected = mhc.hc_mix_stats_sinkhorn(*args)
+                    actual = mhc.hc_mix_stats_sinkhorn(*args, sm90_decode=True)
+                    for got, ref in zip(actual, expected):
+                        torch.testing.assert_close(got, ref, rtol=0, atol=0)
 
     def test_strides_scales_and_sinkhorn_iterations(self):
         for iters in (1, 2, 20):
@@ -83,6 +95,7 @@ class TestMhcSm90Fusion(CustomTestCase):
             ({}, True, True),
             ({}, False, False),
             ({"m": 1}, False, True),  # Existing default one-row path.
+            ({"m": 1}, True, True),  # Opt-in also tunes this projection.
             ({"m": 0}, True, False),
             ({"m": 257}, True, False),
             ({"hidden": 4096}, True, False),
@@ -113,13 +126,15 @@ class TestMhcSm90Fusion(CustomTestCase):
                 ):
                     self.run_stats(args, enabled)
                     self.assertEqual(fused.call_count, int(expected))
+                    if expected:
+                        self.assertEqual(fused.call_args.kwargs["sm90_decode"], enabled)
 
     def test_batch_invariance_inside_supported_range(self):
         args = self.inputs(256)
         row = args[0][:1].clone()
         args[0][0].copy_(row[0])
         expected = self.run_stats((row, *args[1:]), True)
-        for m in (2, 6, 12, 36, 96, 192, 256):
+        for m in (2, 6, 12, 36, 96, 180, 192, 256):
             got = self.run_stats((args[0][:m], *args[1:]), True)
             for a, b in zip(got, expected):
                 torch.testing.assert_close(a[:1], b, rtol=0, atol=0)

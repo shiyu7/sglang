@@ -3211,27 +3211,26 @@ class DeepseekV4DecoderLayer(nn.Module):
         from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
 
         x_flat = x.flatten(1)
+        sm90_fused_mhc = (
+            x.is_cuda
+            and torch.version.cuda is not None
+            and get_platform().is_sm90
+            and envs.SGLANG_OPT_DSV41_SM90_FUSED_MHC.get()
+            and self.config.model_type == "deepseek_v41"
+            and self.hc_pre_from_prev_sublayer
+            and self.hc_mult == 4
+            and x_flat.shape[1] == 20480
+            and 0 < x.shape[0] <= 256
+            and x.dtype == torch.bfloat16
+            and not is_batch_invariant_mode_enabled()
+        )
 
         if (
             x.is_cuda
             and torch.version.cuda is not None
             and (
                 get_platform().is_blackwell
-                or (
-                    get_platform().is_sm90
-                    and (
-                        x.shape[0] == 1
-                        or (
-                            envs.SGLANG_OPT_DSV41_SM90_FUSED_MHC.get()
-                            and self.config.model_type == "deepseek_v41"
-                            and self.hc_pre_from_prev_sublayer
-                            and self.hc_mult == 4
-                            and x_flat.shape[1] == 20480
-                            and 1 < x.shape[0] <= 256
-                            and not is_batch_invariant_mode_enabled()
-                        )
-                    )
-                )
+                or (get_platform().is_sm90 and (x.shape[0] == 1 or sm90_fused_mhc))
             )
             and x.dtype == torch.bfloat16
         ):
@@ -3300,6 +3299,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                         self.hc_sinkhorn_iters,
                         self.rms_norm_eps,
                         self.hc_eps,
+                        sm90_decode=sm90_fused_mhc,
                     )
             if stats_stream is not None:
                 # Allocated on the side stream, read on the main stream after the join.
