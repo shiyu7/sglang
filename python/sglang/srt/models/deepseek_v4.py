@@ -3208,6 +3208,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         stats_stream: Optional[torch.cuda.Stream] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         from sglang.kernels.ops.layernorm.mhc import hc_mix_stats, hc_mix_stats_sinkhorn
+        from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
 
         x_flat = x.flatten(1)
 
@@ -3216,11 +3217,29 @@ class DeepseekV4DecoderLayer(nn.Module):
             and torch.version.cuda is not None
             and (
                 get_platform().is_blackwell
-                or (get_platform().is_sm90 and x.shape[0] == 1)
+                or (
+                    get_platform().is_sm90
+                    and (
+                        x.shape[0] == 1
+                        or (
+                            envs.SGLANG_OPT_DSV41_SM90_FUSED_MHC.get()
+                            and self.config.model_type == "deepseek_v41"
+                            and self.hc_pre_from_prev_sublayer
+                            and self.hc_mult == 4
+                            and x_flat.shape[1] == 20480
+                            and 1 < x.shape[0] <= 256
+                            and not is_batch_invariant_mode_enabled()
+                        )
+                    )
+                )
             )
             and x.dtype == torch.bfloat16
         ):
-            # Fusing the split-K reduction with sinkhorn keeps it batch-invariant.
+            # Keep the split-K projection/reduction order. The fused Sinkhorn
+            # uses Triton transcendental lowering rather than TileLang, so
+            # the opt-in is numerical (not bitwise) parity with the old path.
+            # These coefficients belong to the NEXT sublayer: do not fuse the
+            # current combine using this newly computed pre-mix.
             main_stream = torch.cuda.current_stream()
             if stats_stream is not None:
                 x.record_stream(stats_stream)
@@ -3229,10 +3248,6 @@ class DeepseekV4DecoderLayer(nn.Module):
                 if stats_stream is not None
                 else nullcontext()
             ):
-                from sglang.srt.batch_invariant_ops import (
-                    is_batch_invariant_mode_enabled,
-                )
-
                 parts = bf16_parts = None
                 if (
                     x_flat.shape[0] >= 128
