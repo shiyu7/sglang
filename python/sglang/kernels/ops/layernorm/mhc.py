@@ -2475,6 +2475,8 @@ def hc_mix_stats_sinkhorn(
     sinkhorn_iters: int,
     rms_eps: float,
     hc_eps: float,
+    *,
+    sm90_decode: bool = False,
 ):
     """Fuse the reduce and sinkhorn stages of hc_mix_stats followed by hc_split_sinkhorn.
 
@@ -2515,7 +2517,7 @@ def hc_mix_stats_sinkhorn(
         BLOCK_K=_HC_MIX_BLOCK_K,
         DOT_PRECISION=_HC_MIX_DOT_PRECISION,
         num_warps=_HC_MIX_NUM_WARPS,
-        num_stages=_num_stages_for(m, k),
+        num_stages=1 if sm90_decode else _num_stages_for(m, k),
     )
     if _is_hip:
         hc_mix_reduce_sinkhorn_vec(
