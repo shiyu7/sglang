@@ -2516,7 +2516,20 @@ def hc_mix_stats_sinkhorn(
         BLOCK_M=block_m,
         BLOCK_K=_HC_MIX_BLOCK_K,
         DOT_PRECISION=_HC_MIX_DOT_PRECISION,
-        num_warps=_HC_MIX_NUM_WARPS,
+        # Two warps improve the small SM90 verify/draft batches without changing
+        # split-K, BLOCK_K or tf32x3 arithmetic. Aligned batches from 128 rows
+        # retain four warps, which were already efficient for those shapes.
+        num_warps=(
+            2
+            if (
+                sm90_decode
+                and k == 20480
+                and mix == 24
+                and 96 <= m <= 180
+                and (m < 128 or m % 16 != 0)
+            )
+            else _HC_MIX_NUM_WARPS
+        ),
         num_stages=1 if sm90_decode else _num_stages_for(m, k),
     )
     if _is_hip:
