@@ -1648,6 +1648,8 @@ class Envs:
     SGLANG_OPT_DSV41_SM90_LENGTH_AWARE_INDEXER = EnvBool(False)
     # Exact bitwise FP4 decode plus pipelined prefix scoring; H20 opt-in A/B.
     SGLANG_OPT_DSV41_SM90_PREFIX_LOGITS = EnvBool(False)
+    # BF16 O-A, 8 local groups and 160..192 target-verify rows; H20 opt-in.
+    SGLANG_OPT_DSV41_SM90_WO_A = EnvBool(False)
     # Compact candidate lists for the length-aware static-verify path. Sources
     # reuse prefix scores; consumers visit selected blocks instead of full masks.
     SGLANG_OPT_DSV41_SM90_COMPACT_CANDIDATES = EnvBool(False)

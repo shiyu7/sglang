@@ -59,3 +59,43 @@ The existing compact indexer's tie contract is unchanged.
 ```bash
 PYTHONPATH=python python3 test/registered/kernels/ops/attention/dsv4/test_sm90_length_aware_indexer.py
 ```
+
+## WO_A
+
+Enable `SGLANG_OPT_DSV41_SM90_WO_A=1`. The admitted BF16 target-verify path has
+8 local groups and M=96..192. M<160 uses token-major cuBLAS BMM output to avoid
+an output-layout copy; M=160..192 uses the measured Triton GEMM. Ordinary
+decode, unsupported shapes and disabled flags retain their existing paths.
+
+For 40 independent layer weights at M=120, WO_A plus layout changed from
+3.127 to 2.925 ms. In the full 160-request trace, the layout copy's 0.210 ms
+was removed while GEMM time was essentially unchanged. Tests cover FP32
+reference tolerances, dispatch fallback, and graph input/weight updates.
+WO_A is BF16-tolerance validated; it is not claimed bitwise equal to einsum.
+
+```bash
+PYTHONPATH=python python3 test/registered/kernels/ops/attention/dsv4/test_sm90_wo_a.py
+```
+
+## End-to-end evidence
+
+The latest comparison used the original generated-shared-prefix text dataset:
+seed 5, 1 group, 2048 prompts, system length 15984, question length 16, output
+1500, client concurrency 152. Every run completed 2048 requests, with
+33,475,203 input and 3,072,000 output tokens. The on-disk prompt cache SHA256
+was `6214dbbcdcbdda3d28d985aaffe38f0cadd2a6f3061b7beb7bd7d9eeb038ddff`.
+Both workers' runtime caches were flushed before each native benchmark run;
+the native single-request 32-token warmup was retained. All three flags were
+already on in the baseline; WO_A was fixed throughout this comparison.
+
+| Version | Mean output tok/s (3 runs) | Mean TPOT ms | Mean acceptance length |
+| --- | ---: | ---: | ---: |
+| Earlier fused baseline (`11c64b0480`) | 13562.84 | 10.1215 | 5.83025 |
+| Plus mHC small-row launch tuning | 13800.50 | 9.9555 | 5.83405 |
+| Plus prefix role scheduling | 13850.91 | 9.9260 | 5.83594 |
+
+mHC's incremental mean throughput was +1.75%; all changes together were
++2.12% relative to that baseline. Three sequential runs per group are subject
+to time drift and variance; these averages alone do not establish statistical
+significance. This comparison does not measure WO_A on/off, and component
+gains must not be added as if they were serial whole-model gains.
