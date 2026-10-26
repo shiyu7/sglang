@@ -102,6 +102,35 @@ To reproduce the non-thinking evaluation, pass
 controls the model's thinking mode, not the MoE backend. Closing thinking does
 not guarantee a short response or eliminate repeated generation.
 
+## Experimental compact PD decode
+
+The compact extension supports DeepSeek-V4.1 Mooncake **decode** with MegaMoE,
+one attention rank per DP group (`attn_dp_size == tp_size`), PP=CP=DCP=1,
+and overlap scheduling. Prefill coordination and compact prefill remain
+unsupported. Keep the prefill server on static verification and use the same
+DSPARK block size and KV layout on both servers.
+
+For a TP8/EP8 PD decode command with attention DP8, change the verify mode and
+provide a cost table measured for the serving configuration:
+
+```bash
+export SGLANG_RAGGED_VERIFY_MODE=compact
+# Add to the decode server's existing arguments:
+# --speculative-dspark-sps-table-path /path/to/profiled-sps.json
+```
+
+Without a profiled SPS table, compact defaults to verify-all and does not
+adapt the verify budget. Check the startup log for `graph_tier=dp-gathered`
+and inspect `verify_tokens_local`, `verify_tokens_dp_synced`, and
+`verify_tokens_graph_key` in DSPARK records when validating compaction.
+
+The 1017 checkpoint completed graph capture and 64/256-concurrency PD runs on
+eight H20s with this extension. Those runs used forced diagnostic budgets;
+they do not establish adaptive throughput gains. Four instructed chat prompts,
+repeated for 64 requests across full and trimmed budgets, matched static output.
+Raw greedy completions varied even in the static control; broader accuracy
+validation is still needed before enabling this path for production traffic.
+
 ## Optional ReduceScatter path
 
 For ordinary decode without DSPARK, remove all three `--speculative-*`

@@ -1974,6 +1974,15 @@ class DeepseekV4AttnBackend(
             ),
             c4_compress_metadata=create(compress_ratio=4) if self.has_c4 else None,
             c128_compress_metadata=c128_compress_metadata,
+            # The packed request map also drives V4.1's ratio-1/2 sources.
+            # Repeating the fixed draft width misassigns rows after the first
+            # request whose verify budget was trimmed.
+            low_ratio_req_indices=(
+                req_pool_indices_repeated.to(torch.int64) if low else None
+            ),
+            low_ratio_pos_i64=(
+                core_attn_metadata.positions_casual.to(torch.int64) if low else None
+            ),
         )
 
     def make_forward_metadata_from_raw_decode(
