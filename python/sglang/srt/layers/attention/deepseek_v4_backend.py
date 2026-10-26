@@ -992,6 +992,12 @@ class DSV4Metadata:
     low_ratio_req_indices: Optional[torch.Tensor] = None
     low_ratio_pos_i64: Optional[torch.Tensor] = None
 
+    # Compact verify request boundaries for fused c2 pooling and ring write-back.
+    # Keep these device tensors with the captured metadata: the packed lengths
+    # and starts can change on every replay at the same token-count bucket.
+    low_ratio_verify_start_loc: Optional[torch.Tensor] = None
+    low_ratio_verify_lens: Optional[torch.Tensor] = None
+
     # Per-step scratch for TP-padded query heads, zeroed by the first user.
     # Later layers overwrite real heads and preserve the zero padding.
     q_pad_buffer: Optional[torch.Tensor] = None
@@ -1021,6 +1027,10 @@ class DSV4Metadata:
         maybe_copy_inplace(
             self.c128_compress_metadata, src=other.c128_compress_metadata
         )
+        maybe_copy_inplace(
+            self.low_ratio_verify_start_loc, src=other.low_ratio_verify_start_loc
+        )
+        maybe_copy_inplace(self.low_ratio_verify_lens, src=other.low_ratio_verify_lens)
         self.sparse_prefill_cache = None
         self.prefill_shared_reads_snapshotted = False
 
@@ -1040,6 +1050,13 @@ class DSV4Metadata:
         )
         maybe_copy_inplace(
             self.low_ratio_pos_i64, src=static_metadata.low_ratio_pos_i64
+        )
+        maybe_copy_inplace(
+            self.low_ratio_verify_start_loc,
+            src=static_metadata.low_ratio_verify_start_loc,
+        )
+        maybe_copy_inplace(
+            self.low_ratio_verify_lens, src=static_metadata.low_ratio_verify_lens
         )
         maybe_copy_inplace(
             self.c4_compress_metadata, src=static_metadata.c4_compress_metadata
@@ -1983,6 +2000,14 @@ class DeepseekV4AttnBackend(
             low_ratio_pos_i64=(
                 core_attn_metadata.positions_casual.to(torch.int64) if low else None
             ),
+            low_ratio_verify_start_loc=(
+                raw_metadata.extend_start_loc.to(torch.int32)
+                if low and is_ragged
+                else None
+            ),
+            low_ratio_verify_lens=(
+                raw_metadata.verify_lens.to(torch.int32) if low and is_ragged else None
+            ),
         )
 
     def make_forward_metadata_from_raw_decode(
@@ -2916,14 +2941,33 @@ class DeepseekV4AttnBackend(
             and not self.is_dspark_draft
             and layer.compress_ratio in (1, 2)
             and layer.compressor.use_fused_compress
+            and self.forward_metadata.low_ratio_verify_start_loc is not None
+        ):
+            # Compact rows are request-major, but have variable group lengths.
+            # The extend kernel tests each predecessor's request and position,
+            # then writes the ring in a separate launch to avoid read/write races.
+            self._low_ratio_compress_fused(
+                layer,
+                x,
+                req,
+                pos,
+                extend_offsets=(
+                    self.forward_metadata.low_ratio_verify_start_loc,
+                    self.forward_metadata.low_ratio_verify_lens,
+                ),
+            )
+        elif (
+            forward_batch.forward_mode.is_target_verify()
+            and not self.is_dspark_draft
+            and layer.compress_ratio in (1, 2)
+            and layer.compressor.use_fused_compress
             and read_ragged_verify_mode() is not RaggedVerifyMode.COMPACT
             and self.speculative_num_draft_tokens is not None
             and self.speculative_num_draft_tokens > 1
             and x.shape[0]
             == forward_batch.batch_size * self.speculative_num_draft_tokens
         ):
-            # Static verify is request-major with consecutive positions; compact
-            # verify has variable block lengths and keeps the general path.
+            # Fixed-width verify can use the single-launch grouped compressor.
             self._low_ratio_compress_fused(
                 layer, x, req, pos, draft_len=self.speculative_num_draft_tokens
             )
@@ -3273,7 +3317,17 @@ class DeepseekV4AttnBackend(
             ):
                 group_size = self.speculative_num_draft_tokens
             self._low_ratio_index_topk_sm90_decode(
-                layer, x, q_lora, req, pos, group_size=group_size
+                layer,
+                x,
+                q_lora,
+                req,
+                pos,
+                group_size=group_size,
+                ragged_verify=(
+                    mode.is_target_verify()
+                    and not self.is_dspark_draft
+                    and read_ragged_verify_mode() is RaggedVerifyMode.COMPACT
+                ),
             )
             return
         if self._use_sm90_fp8_prefill_indexer(forward_batch):
@@ -3590,7 +3644,7 @@ class DeepseekV4AttnBackend(
             )
 
     def _low_ratio_index_topk_sm90_decode(
-        self, layer, x, q_lora, req, pos, *, group_size=1
+        self, layer, x, q_lora, req, pos, *, group_size=1, ragged_verify=False
     ) -> None:
         pool = self.token_to_kv_pool
         core = self.forward_metadata.core_metadata
@@ -3621,9 +3675,8 @@ class DeepseekV4AttnBackend(
         q = indexer.queries(q_lora, layer.freqs_cis[pos])
         weights = indexer.head_weights(x)
         table = pool.get_index_k_with_scale_buffer(layer.layer_id)
-        use_grouped = (
+        use_mapped = (
             envs.SGLANG_OPT_DSV41_SM90_GROUPED_INDEXER.get()
-            and group_size > 1
             and ratio in (1, 2)
             and q.is_cuda
             and torch.version.cuda is not None
@@ -3638,8 +3691,13 @@ class DeepseekV4AttnBackend(
             and table.dim() == 2
             and table.stride(1) == 1
         )
+        # Prefix logits consumes per-row request IDs and device lengths. Unlike
+        # the grouped/paired kernels, it requires no fixed request block width.
+        # Compact verify deliberately keeps group_size=1 to preserve boundaries.
+        use_grouped = use_mapped and group_size > 1
         use_length_aware = (
-            use_grouped
+            use_mapped
+            and (use_grouped or ragged_verify)
             and envs.SGLANG_OPT_DSV41_SM90_LENGTH_AWARE_INDEXER.get()
             and q.shape[1] == 32
             and 0 < indexer.index_topk <= 2048
