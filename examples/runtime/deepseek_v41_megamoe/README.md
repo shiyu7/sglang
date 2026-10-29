@@ -131,6 +131,47 @@ repeated for 64 requests across full and trimmed budgets, matched static output.
 Raw greedy completions varied even in the static control; broader accuracy
 validation is still needed before enabling this path for production traffic.
 
+### Calibrated B6 / 16K table on H20
+
+The bundled [B6 cost table](dspark_sps_b6_16k_h20.json) was recalibrated for
+commit `ea45913771` with the 1017 checkpoint on eight H20s. Decode uses
+TP8/EP8/attention-DP8, `dsv4` attention, `deep_gemm`/MegaMoE, `humming`,
+`--cuda-graph-max-bs-decode 32`, and `--max-running-requests 256`.
+The [calibration metadata](dspark_sps_b6_16k_h20.metadata.json) records the
+optimization environment, graph tiers, validation errors, and benchmark setup.
+
+From the repository root, apply these settings to a PD decode command matching
+that configuration. Use B6 and a compatible KV layout on the prefill server too:
+
+```bash
+export SGLANG_RAGGED_VERIFY_MODE=compact
+unset SGLANG_SIMULATE_ACC_LEN
+# Add to the decode server's existing arguments:
+# --speculative-dspark-block-size 6
+# --speculative-dspark-sps-table-path examples/runtime/deepseek_v41_megamoe/dspark_sps_b6_16k_h20.json
+# --speculative-dspark-align-verify-tokens-to-graph-tier
+```
+
+The 12 held-out calibration windows had a mean absolute relative error of
+1.00% (maximum 1.79%). Six sparse active-rank windows had 7.94% mean error
+(maximum 10.48%). Revalidate the table when changing the serving configuration.
+
+Three runs per mode used a generated shared-prefix workload with approximately
+16.7K input tokens and 1K output tokens, 1,024 requests per run, and no simulated
+acceptance. All 18,432 requests succeeded. Relative to the matched B6 static
+baseline, the mean results were:
+
+| Concurrency | Throughput change | Request P99 TPOT change |
+|---|---:|---:|
+| 64 | +8.58% | +2.61% |
+| 128 | +8.09% | +2.59% |
+| 256 | +5.05% | +7.80% |
+
+Positive P99 changes mean higher latency. At concurrency 256, the three paired
+throughput changes were +9.89%, -0.92%, and +6.02%. This configuration improved
+mean throughput while leaving request-level tail latency worse in this workload.
+The comparison measures the combined new-table and graph-fill configuration.
+
 ## Optional ReduceScatter path
 
 For ordinary decode without DSPARK, remove all three `--speculative-*`
