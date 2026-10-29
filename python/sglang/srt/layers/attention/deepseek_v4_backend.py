@@ -30,7 +30,6 @@ from sglang.kernels.ops.attention.dsv4.dequant_k_cache import (
     gather_dequant_requant_fp8_paged,
     q8kv8_padded_num_heads,
 )
-from sglang.kernels.ops.attention.dsv4.fp4_indexer import fp4_index_logits_decode
 from sglang.kernels.ops.attention.dsv4.kv_layout import KVLayout
 from sglang.kernels.ops.attention.dsv4.metadata_kernel import (
     fill_all_compressed_indices,
@@ -65,6 +64,7 @@ from sglang.srt.layers.attention.dsv4.candidate_indexer import (
     mask_topk_scores,
     published_masks,
     select_candidate_blocks,
+    sm90_index_logits_with_candidates,
 )
 from sglang.srt.layers.attention.dsv4.compressor_v2 import (
     CompressorBackendMixin,
@@ -3554,24 +3554,16 @@ class DeepseekV4AttnBackend(
         )
         slots = slots.masked_fill(~valid, 0)
         table = pool.get_index_k_with_scale_buffer(layer.layer_id)
-        s = fp4_index_logits_decode(
-            q, weights, slots, lens, table, table.shape[1] // 68
+        s, self.forward_metadata.candidate_metadata = sm90_index_logits_with_candidates(
+            q,
+            weights,
+            slots,
+            lens,
+            table,
+            table.shape[1] // 68,
+            indexer=indexer,
+            candidate_metadata=self.forward_metadata.candidate_metadata,
         )
-        if indexer.is_candidate_source:
-            mask = select_candidate_blocks(
-                s,
-                lens[:, None],
-                topk_blocks=indexer.candidate_topk_blocks,
-                block_size=indexer.candidate_block_size,
-            )
-            self.forward_metadata.candidate_metadata = CandidateMasks(mask=mask)
-        elif indexer.uses_candidates:
-            # Published this step by the candidate-source layer's decode pass above.
-            consume = published_masks(self.forward_metadata.candidate_metadata).mask
-            assert torch.is_tensor(consume) and consume.shape[0] == bs, (
-                "candidate mask missing for decode"
-            )
-            s = s.masked_fill(~consume[:, :lmax], -torch.inf)
         k = min(indexer.index_topk, lmax)
         idx = s.topk(k, dim=-1, sorted=False).indices
         if indexer.uses_candidates and not indexer.is_candidate_source:

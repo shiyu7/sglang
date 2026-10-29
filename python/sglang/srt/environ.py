@@ -1513,6 +1513,9 @@ class Envs:
     # Run the DeepSeek-V4.1 ratio-1/2 prefill indexer on the torch path instead
     # of the DeepGEMM dense fp4 logits kernel (test oracle / fallback).
     SGLANG_DSV41_TORCH_PREFILL_INDEXER = EnvBool(False)
+    # Move the V4.1 SM90 consumer candidate mask before index-K reads/dots.
+    # Keep the dense logits + post-mask oracle available for validation and A/B.
+    SGLANG_DSV41_SM90_CANDIDATE_MASK = EnvBool(False)
     SGLANG_FP8_PAGED_MQA_LOGITS_TORCH = EnvBool(False)
     SGLANG_OPT_FLASHMLA_SPARSE_PREFILL = EnvBool(True)
 

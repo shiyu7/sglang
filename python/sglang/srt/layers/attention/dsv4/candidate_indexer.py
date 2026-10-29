@@ -116,3 +116,54 @@ def select_candidate_blocks(
         -1, top.indices, top.values > -torch.inf
     )
     return keep.repeat_interleave(block_size, dim=-1)[..., :width]
+
+
+def sm90_index_logits_with_candidates(
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    slots: torch.Tensor,
+    lens: torch.Tensor,
+    table: torch.Tensor,
+    page_size: int,
+    *,
+    indexer,
+    candidate_metadata: Optional[CandidateMetadata],
+) -> tuple[torch.Tensor, Optional[CandidateMetadata]]:
+    """SM90 source publication and consumer masking, before the original TopK.
+
+    The source always scores the full context. Consumers keep its per-query
+    mask, including distinct rows of one request under speculative verification.
+    This helper deliberately leaves logits layout and TopK behavior unchanged.
+    """
+    from sglang.kernels.ops.attention.dsv4.fp4_indexer import fp4_index_logits_decode
+    from sglang.srt.environ import envs
+
+    consume = None
+    if indexer.uses_candidates and not indexer.is_candidate_source:
+        consume = published_masks(candidate_metadata).mask
+        assert torch.is_tensor(consume) and consume.shape[0] == q.shape[0], (
+            "candidate mask missing for decode"
+        )
+        consume = consume[:, : slots.shape[1]]
+    move_mask = envs.SGLANG_DSV41_SM90_CANDIDATE_MASK.get()
+    scores = fp4_index_logits_decode(
+        q,
+        weights,
+        slots,
+        lens,
+        table,
+        page_size,
+        candidate_mask=consume if move_mask else None,
+    )
+    if indexer.is_candidate_source:
+        mask = select_candidate_blocks(
+            scores,
+            lens[:, None],
+            topk_blocks=indexer.candidate_topk_blocks,
+            block_size=indexer.candidate_block_size,
+        )
+        candidate_metadata = CandidateMasks(mask=mask)
+    elif consume is not None and not move_mask:
+        # Dense oracle for A/B, including the original choice among ties.
+        scores = scores.masked_fill(~consume, -torch.inf)
+    return scores, candidate_metadata
