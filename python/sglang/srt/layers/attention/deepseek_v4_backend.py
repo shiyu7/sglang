@@ -3185,7 +3185,16 @@ class DeepseekV4AttnBackend(
                 req_ids = None if forward_batch.forward_mode.is_decode() else req
                 self._low_ratio_index_topk_decode(layer, x, q_lora, pos, req_ids)
             else:
-                self._low_ratio_index_topk_sm90_decode(layer, x, q_lora, req, pos)
+                self._low_ratio_index_topk_sm90_decode(
+                    layer,
+                    x,
+                    q_lora,
+                    req,
+                    pos,
+                    request_ids=req
+                    if forward_batch.forward_mode.is_target_verify()
+                    else None,
+                )
         elif (
             self._use_dense_fp4_prefill_indexer(forward_batch) and _is_sm100_or_newer()
         ):
@@ -3516,7 +3525,9 @@ class DeepseekV4AttnBackend(
 
     # TODO(candidate): Hopper decode still publishes / consumes masks inline (torch
     # top-k); move into the candidate indexer with the prefill paths.
-    def _low_ratio_index_topk_sm90_decode(self, layer, x, q_lora, req, pos) -> None:
+    def _low_ratio_index_topk_sm90_decode(
+        self, layer, x, q_lora, req, pos, *, request_ids=None
+    ) -> None:
         pool = self.token_to_kv_pool
         core = self.forward_metadata.core_metadata
         ratio = layer.compress_ratio
@@ -3563,6 +3574,7 @@ class DeepseekV4AttnBackend(
             table.shape[1] // 68,
             indexer=indexer,
             candidate_metadata=self.forward_metadata.candidate_metadata,
+            request_ids=request_ids,
         )
         k = min(indexer.index_topk, lmax)
         idx = s.topk(k, dim=-1, sorted=False).indices

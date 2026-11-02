@@ -68,6 +68,10 @@ def make_candidate_indexer(
 class CandidateMasks(CandidateMetadata):
     mask: Optional[torch.Tensor] = None  # decode: [rows, width] bool
     request_masks: Optional[List[torch.Tensor]] = None  # prefill: [rows_b, lc_b] each
+    # Optional unique source-selected block ids, with -1 for unreachable blocks.
+    # Reused by SM90 consumers; never compact the logits supplied to torch.topk.
+    block_indices: Optional[torch.Tensor] = None
+    block_size: int = 0
 
 
 def published_masks(candidate) -> CandidateMasks:
@@ -96,7 +100,9 @@ def select_candidate_blocks(
     compress_lens: Union[torch.Tensor, int],
     topk_blocks: int,
     block_size: int,
-) -> torch.Tensor:
+    *,
+    return_block_indices: bool = False,
+) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """Level one of the two-level top-k: a bool mask over positions keeping the
     topk_blocks best-scoring blocks per query. Unreachable positions are already -inf
     in logits, so an all -inf block means not reachable yet; the block holding the
@@ -115,7 +121,11 @@ def select_candidate_blocks(
     keep = torch.zeros_like(scores, dtype=torch.bool).scatter_(
         -1, top.indices, top.values > -torch.inf
     )
-    return keep.repeat_interleave(block_size, dim=-1)[..., :width]
+    mask = keep.repeat_interleave(block_size, dim=-1)[..., :width]
+    if return_block_indices:
+        blocks = top.indices.masked_fill(~(top.values > -torch.inf), -1).to(torch.int32)
+        return mask, blocks
+    return mask
 
 
 def should_move_sm90_candidate_mask(width: int) -> bool:
@@ -140,13 +150,17 @@ def sm90_index_logits_with_candidates(
     *,
     indexer,
     candidate_metadata: Optional[CandidateMetadata],
+    request_ids: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, Optional[CandidateMetadata]]:
     """SM90 source publication and consumer masking, before the original TopK.
 
     The source always scores the full context. Consumers keep its per-query
     mask, including distinct rows of one request under speculative verification.
     Short logits widths retain dense scoring followed by the candidate mask.
-    This helper deliberately leaves logits layout and TopK behavior unchanged.
+    Optional compaction reuses the source's block TopK and scatters scores back
+    into the original dense layout. Query pairing reuses K only within this
+    layer, with device-side request/mapping checks. Compact consumers take
+    priority when both experimental paths are enabled. TopK stays unchanged.
     """
     from sglang.kernels.ops.attention.dsv4.fp4_indexer import fp4_index_logits_decode
     from sglang.srt.environ import envs
@@ -163,23 +177,82 @@ def sm90_index_logits_with_candidates(
         and envs.SGLANG_DSV41_SM90_CANDIDATE_MASK.get()
         and should_move_sm90_candidate_mask(slots.shape[1])
     )
-    scores = fp4_index_logits_decode(
-        q,
-        weights,
-        slots,
-        lens,
-        table,
-        page_size,
-        candidate_mask=consume if move_mask else None,
+    compact_enabled = (
+        envs.SGLANG_DSV41_SM90_CANDIDATE_MASK.get()
+        and envs.SGLANG_DSV41_SM90_CANDIDATE_COMPACT.get()
+        and should_move_sm90_candidate_mask(slots.shape[1])
     )
+    compact_blocks = (
+        published_masks(candidate_metadata).block_indices
+        if consume is not None and compact_enabled
+        else None
+    )
+    use_compact = (
+        compact_blocks is not None
+        and candidate_metadata.block_size in (1, 2, 4, 8, 16, 32, 64)
+        and compact_blocks.shape[1] * candidate_metadata.block_size < slots.shape[1]
+    )
+    if use_compact:
+        from sglang.kernels.ops.attention.dsv4.sm90_candidate_indexer import (
+            compact_candidate_logits,
+        )
+
+        scores = compact_candidate_logits(
+            q,
+            weights,
+            slots,
+            lens,
+            table,
+            page_size,
+            compact_blocks,
+            candidate_metadata.block_size,
+            candidate_mask=consume,
+        )
+    elif (
+        envs.SGLANG_DSV41_SM90_QUERY_K_REUSE.get()
+        and request_ids is not None
+        and q.shape[0] > 1
+        and q.shape[1] == 32
+    ):
+        from sglang.kernels.ops.attention.dsv4.sm90_candidate_indexer import (
+            paired_query_logits,
+        )
+
+        scores = paired_query_logits(
+            q,
+            weights,
+            slots,
+            lens,
+            table,
+            page_size,
+            request_ids,
+            candidate_mask=consume if move_mask else None,
+        )
+    else:
+        scores = fp4_index_logits_decode(
+            q,
+            weights,
+            slots,
+            lens,
+            table,
+            page_size,
+            candidate_mask=consume if move_mask else None,
+        )
     if indexer.is_candidate_source:
-        mask = select_candidate_blocks(
+        selected = select_candidate_blocks(
             scores,
             lens[:, None],
             topk_blocks=indexer.candidate_topk_blocks,
             block_size=indexer.candidate_block_size,
+            return_block_indices=compact_enabled,
         )
-        candidate_metadata = CandidateMasks(mask=mask)
+        if compact_enabled:
+            mask, blocks = selected
+            candidate_metadata = CandidateMasks(
+                mask=mask, block_indices=blocks, block_size=indexer.candidate_block_size
+            )
+        else:
+            candidate_metadata = CandidateMasks(mask=selected)
     elif consume is not None and not move_mask:
         # Dense oracle for A/B, including the original choice among ties.
         scores = scores.masked_fill(~consume, -torch.inf)

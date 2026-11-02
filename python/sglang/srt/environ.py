@@ -1519,6 +1519,12 @@ class Envs:
     # Compressed logits width (graph capacity), not live GPU sequence lengths.
     # Short widths retain dense scoring + post-mask; 0 restores always-on PR1.
     SGLANG_DSV41_SM90_CANDIDATE_MASK_MIN_WIDTH = EnvInt(65536)
+    # Score source-selected blocks and scatter back to original dense logits.
+    # Experimental and independent from any custom/compact TopK implementation.
+    SGLANG_DSV41_SM90_CANDIDATE_COMPACT = EnvBool(False)
+    # Experimental: reuse index-K loading/dequantization for H32 verify queries.
+    # Request/slot equality is checked on device; compact consumers take priority.
+    SGLANG_DSV41_SM90_QUERY_K_REUSE = EnvBool(False)
     SGLANG_FP8_PAGED_MQA_LOGITS_TORCH = EnvBool(False)
     SGLANG_OPT_FLASHMLA_SPARSE_PREFILL = EnvBool(True)
 
