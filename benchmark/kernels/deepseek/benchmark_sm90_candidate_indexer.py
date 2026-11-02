@@ -6,6 +6,9 @@ Run on one Hopper GPU, for example:
     --candidate-blocks 2048 --execution eager graph --output /tmp/sm90-candidates.jsonl
 
 All providers use the same dense FP32 logits layout and original torch TopK.
+candidate_auto uses the production width policy (default 65536); override it
+with SGLANG_DSV41_SM90_CANDIDATE_MASK_MIN_WIDTH. The two forced providers are
+independent of both feature flags so that the oracle remains available.
 The score stage includes post-mask for the baseline; score_topk adds original
 TopK, logical sorting, underfill masking and physical-slot conversion. Group
 also includes dense source scoring, its token TopK and real candidate-block
@@ -26,7 +29,11 @@ import torch
 
 from sglang.benchmark.bench_utils import run_bench
 from sglang.kernels.ops.attention.dsv4.fp4_indexer import fp4_index_logits_decode
-from sglang.srt.layers.attention.dsv4.candidate_indexer import select_candidate_blocks
+from sglang.srt.environ import envs
+from sglang.srt.layers.attention.dsv4.candidate_indexer import (
+    select_candidate_blocks,
+    should_move_sm90_candidate_mask,
+)
 from sglang.test.kernels.deepseek_v4.sm90_candidate_indexer import (
     make_candidate_case,
     select_candidate_topk,
@@ -46,6 +53,9 @@ def score(case, mask=None):
 
 
 def consumer(case, mask, masked, topk, *, select=True):
+    # None selects the production width policy, independently of its master flag.
+    if masked is None:
+        masked = should_move_sm90_candidate_mask(case["slots"].shape[1])
     logits = score(case, mask if masked else None)
     if not masked:
         logits = logits.masked_fill(~mask, -torch.inf)
@@ -191,6 +201,10 @@ def main():
                     consumer(case, mask, True, args.topk),
                     consumer(case, mask, False, args.topk),
                 )
+                check_equal(
+                    consumer(case, mask, None, args.topk),
+                    consumer(case, mask, False, args.topk),
+                )
                 stages = {
                     "score": {
                         "dense_postmask": lambda: consumer(
@@ -198,6 +212,9 @@ def main():
                         ),
                         "candidate_premask": lambda: consumer(
                             case, mask, True, args.topk, select=False
+                        ),
+                        "candidate_auto": lambda: consumer(
+                            case, mask, None, args.topk, select=False
                         ),
                     },
                     "score_topk": {
@@ -207,6 +224,7 @@ def main():
                         "candidate_premask": lambda: consumer(
                             case, mask, True, args.topk
                         ),
+                        "candidate_auto": lambda: consumer(case, mask, None, args.topk),
                     },
                 }
                 metadata = dict(
@@ -219,10 +237,14 @@ def main():
                     page_size=args.page_size,
                     block_size=args.block_size,
                     topk=args.topk,
-                    requested_density=args.density
-                    if args.candidate_blocks is None
-                    else None,
+                    requested_density=(
+                        args.density if args.candidate_blocks is None else None
+                    ),
                     candidate_topk_blocks=args.candidate_blocks,
+                    candidate_mask_min_width=(
+                        envs.SGLANG_DSV41_SM90_CANDIDATE_MASK_MIN_WIDTH.get()
+                    ),
+                    auto_uses_premask=should_move_sm90_candidate_mask(width),
                     pattern=pattern,
                     mixed_lengths=args.mixed_lengths,
                     **fractions(mask, case["lens"]),
@@ -265,6 +287,24 @@ def main():
                             args.block_size,
                         ),
                     )
+                    check_equal(
+                        group(
+                            case,
+                            consumers,
+                            None,
+                            args.topk,
+                            candidate_blocks,
+                            args.block_size,
+                        ),
+                        group(
+                            case,
+                            consumers,
+                            False,
+                            args.topk,
+                            candidate_blocks,
+                            args.block_size,
+                        ),
+                    )
                     stages["group"] = {
                         "dense_postmask": lambda: group(
                             case,
@@ -278,6 +318,14 @@ def main():
                             case,
                             consumers,
                             True,
+                            args.topk,
+                            candidate_blocks,
+                            args.block_size,
+                        ),
+                        "candidate_auto": lambda: group(
+                            case,
+                            consumers,
+                            None,
                             args.topk,
                             candidate_blocks,
                             args.block_size,
@@ -302,6 +350,10 @@ def main():
                             stage=stage,
                             execution=execution,
                             speedup=speedup,
+                            auto_speedup=(
+                                result["dense_postmask"]["median_us"]
+                                / result["candidate_auto"]["median_us"]
+                            ),
                             timing=result,
                         )
                         records.append(record)

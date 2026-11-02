@@ -156,6 +156,7 @@ class TestSm90CandidateIndexer(CustomTestCase):
                     candidate = None
                     with (
                         envs.SGLANG_DSV41_SM90_CANDIDATE_MASK.override(enabled),
+                        envs.SGLANG_DSV41_SM90_CANDIDATE_MASK_MIN_WIDTH.override(0),
                         patch(
                             f"{kernel_module}.fp4_index_logits_decode",
                             wraps=fp4_index_logits_decode,
@@ -217,6 +218,116 @@ class TestSm90CandidateIndexer(CustomTestCase):
         )
         self.assert_bitwise_equal(actual, expected)
         self.assertIs(state, candidate)
+
+    def test_width_policy_keeps_filtering_below_threshold(self):
+        from sglang.srt.environ import envs
+        from sglang.srt.layers.attention.dsv4.candidate_indexer import (
+            CandidateMasks,
+            sm90_index_logits_with_candidates,
+        )
+
+        indexer = SimpleNamespace(is_candidate_source=False, uses_candidates=True)
+        kernel_module = "sglang.kernels.ops.attention.dsv4.fp4_indexer"
+        for threshold in (0, 64):
+            for width in (63, 64, 65):
+                for enabled in (False, True):
+                    with self.subTest(
+                        threshold=threshold, width=width, enabled=enabled
+                    ):
+                        case = make_candidate_case(
+                            4, width, pattern="scattered", mixed_lengths=True
+                        )
+                        candidate = CandidateMasks(mask=case["candidate_mask"])
+                        with (
+                            envs.SGLANG_DSV41_SM90_CANDIDATE_MASK.override(enabled),
+                            envs.SGLANG_DSV41_SM90_CANDIDATE_MASK_MIN_WIDTH.override(
+                                threshold
+                            ),
+                            patch(
+                                f"{kernel_module}.fp4_index_logits_decode",
+                                wraps=fp4_index_logits_decode,
+                            ) as score,
+                        ):
+                            actual, state = sm90_index_logits_with_candidates(
+                                **{
+                                    k: v
+                                    for k, v in case.items()
+                                    if k != "candidate_mask"
+                                },
+                                indexer=indexer,
+                                candidate_metadata=candidate,
+                            )
+                        self.assertEqual(
+                            score.call_args.kwargs["candidate_mask"] is not None,
+                            enabled and width >= threshold,
+                        )
+                        self.assertIs(state, candidate)
+                        expected = _dense(case)
+                        self.assert_bitwise_equal(actual, expected)
+                        for new, old in zip(
+                            select_candidate_topk(
+                                actual, case["slots"], case["lens"], 64
+                            ),
+                            select_candidate_topk(
+                                expected, case["slots"], case["lens"], 64
+                            ),
+                        ):
+                            self.assertTrue(torch.equal(new, old))
+
+    def test_width_policy_graph_replay_crosses_live_length_threshold(self):
+        from sglang.srt.environ import envs
+        from sglang.srt.layers.attention.dsv4.candidate_indexer import (
+            CandidateMasks,
+            sm90_index_logits_with_candidates,
+        )
+
+        indexer = SimpleNamespace(is_candidate_source=False, uses_candidates=True)
+        # Both capacity branches must read changing lengths AND masks on replay.
+        # A long capacity must retain pre-mask even when its live lengths shrink.
+        for width in (127, 129):
+            with self.subTest(width=width):
+                case = make_candidate_case(4, width, mixed_lengths=True)
+                candidate = CandidateMasks(mask=case["candidate_mask"])
+
+                def run():
+                    logits, _ = sm90_index_logits_with_candidates(
+                        **{k: v for k, v in case.items() if k != "candidate_mask"},
+                        indexer=indexer,
+                        candidate_metadata=candidate,
+                    )
+                    return logits, select_candidate_topk(
+                        logits, case["slots"], case["lens"], 64
+                    )
+
+                with (
+                    envs.SGLANG_DSV41_SM90_CANDIDATE_MASK.override(True),
+                    envs.SGLANG_DSV41_SM90_CANDIDATE_MASK_MIN_WIDTH.override(128),
+                ):
+                    for _ in range(3):
+                        run()
+                    torch.cuda.synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        actual, selected = run()
+                    for seed, pattern in enumerate(("none", "all", "scattered"), 20):
+                        update = make_candidate_case(
+                            4, width, seed=seed, pattern=pattern
+                        )
+                        for key in ("q", "weights", "slots", "table", "candidate_mask"):
+                            case[key].copy_(update[key])
+                        case["lens"].copy_(
+                            torch.tensor([0, 63, min(128, width), width], device="cuda")
+                        )
+                        graph.replay()
+                        expected = _dense(case)
+                        self.assert_bitwise_equal(actual, expected)
+                        for new, old in zip(
+                            selected,
+                            select_candidate_topk(
+                                expected, case["slots"], case["lens"], 64
+                            ),
+                        ):
+                            self.assertTrue(torch.equal(new, old))
 
 
 if __name__ == "__main__":

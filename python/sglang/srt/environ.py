@@ -1516,6 +1516,9 @@ class Envs:
     # Move the V4.1 SM90 consumer candidate mask before index-K reads/dots.
     # Keep the dense logits + post-mask oracle available for validation and A/B.
     SGLANG_DSV41_SM90_CANDIDATE_MASK = EnvBool(False)
+    # Compressed logits width (graph capacity), not live GPU sequence lengths.
+    # Short widths retain dense scoring + post-mask; 0 restores always-on PR1.
+    SGLANG_DSV41_SM90_CANDIDATE_MASK_MIN_WIDTH = EnvInt(65536)
     SGLANG_FP8_PAGED_MQA_LOGITS_TORCH = EnvBool(False)
     SGLANG_OPT_FLASHMLA_SPARSE_PREFILL = EnvBool(True)
 

@@ -118,6 +118,18 @@ def select_candidate_blocks(
     return keep.repeat_interleave(block_size, dim=-1)[..., :width]
 
 
+def should_move_sm90_candidate_mask(width: int) -> bool:
+    """Width policy; the caller separately controls the candidate-mask flag.
+
+    Use the static logits width, including CUDA Graph padding. Reading live
+    lengths on the host would synchronize and freeze a replay-dependent choice.
+    Even short live sequences can benefit from fusing a large padded post-mask.
+    """
+    from sglang.srt.environ import envs
+
+    return width >= envs.SGLANG_DSV41_SM90_CANDIDATE_MASK_MIN_WIDTH.get()
+
+
 def sm90_index_logits_with_candidates(
     q: torch.Tensor,
     weights: torch.Tensor,
@@ -133,6 +145,7 @@ def sm90_index_logits_with_candidates(
 
     The source always scores the full context. Consumers keep its per-query
     mask, including distinct rows of one request under speculative verification.
+    Short logits widths retain dense scoring followed by the candidate mask.
     This helper deliberately leaves logits layout and TopK behavior unchanged.
     """
     from sglang.kernels.ops.attention.dsv4.fp4_indexer import fp4_index_logits_decode
@@ -145,7 +158,11 @@ def sm90_index_logits_with_candidates(
             "candidate mask missing for decode"
         )
         consume = consume[:, : slots.shape[1]]
-    move_mask = envs.SGLANG_DSV41_SM90_CANDIDATE_MASK.get()
+    move_mask = (
+        consume is not None
+        and envs.SGLANG_DSV41_SM90_CANDIDATE_MASK.get()
+        and should_move_sm90_candidate_mask(slots.shape[1])
+    )
     scores = fp4_index_logits_decode(
         q,
         weights,
