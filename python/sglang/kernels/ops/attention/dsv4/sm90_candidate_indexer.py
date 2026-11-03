@@ -186,8 +186,6 @@ def _paired_logits(
     if HAS_MASK:
         valid0 = valid0 & tl.load(MASK + row0 * MB + col * MC, col < WIDTH, False)
         valid1 = valid1 & tl.load(MASK + row1 * MB + col * MC, col < WIDTH, False)
-    score0 = tl.full((64,), -float("inf"), tl.float32)
-    score1 = tl.full((64,), -float("inf"), tl.float32)
     if tl.sum((valid0 | valid1).to(tl.int32), 0) > 0:
         slot0 = tl.load(SLOTS + row0 * WIDTH + col, valid0, 0).to(tl.int64)
         slot1 = tl.load(SLOTS + row1 * WIDTH + col, valid1, 0).to(tl.int64)
@@ -200,48 +198,50 @@ def _paired_logits(
             low, high = _fp4_index_k_tile(
                 TABLE, shared_slot, valid0 | valid1, PAGE_SIZE, TABLE_STRIDE, 64
             )
-            # Separate H32 dots/reductions keep the original accumulation order.
-            score0 = _fp4_index_logits_from_k(
-                Q, W, row0, valid0, low, high, QB, QH, WB, 32, 64
-            )
-            score1 = _fp4_index_logits_from_k(
-                Q, W, row1, valid1, low, high, QB, QH, WB, 32, 64
-            )
+            # Keep H32 dots/reductions and their BF16 rounding unchanged. An
+            # unrolled pair keeps both queries' intermediates live and reduces
+            # occupancy on SM90. Store each result before processing the next
+            # query, retaining only the shared decoded K across iterations.
+            for qi in tl.range(0, 2, loop_unroll_factor=1, num_stages=1):
+                valid = tl.where(qi == 0, valid0, valid1)
+                score = _fp4_index_logits_from_k(
+                    Q, W, row0 + qi, valid, low, high, QB, QH, WB, 32, 64
+                )
+                tl.store(OUT + (row0 + qi) * WIDTH + col, score, col < WIDTH)
         else:
-            if tl.sum(valid0.to(tl.int32), 0) > 0:
-                score0 = _fp4_index_logits_tile(
-                    Q,
-                    W,
-                    TABLE,
-                    row0,
-                    slot0,
-                    valid0,
-                    PAGE_SIZE,
-                    TABLE_STRIDE,
-                    QB,
-                    QH,
-                    WB,
-                    32,
-                    64,
+            for qi in tl.range(0, 2, loop_unroll_factor=1, num_stages=1):
+                row = tl.minimum(row0 + qi, ROWS - 1)
+                valid = tl.where(qi == 0, valid0, valid1)
+                slot = tl.where(qi == 0, slot0, slot1)
+                score = tl.full((64,), -float("inf"), tl.float32)
+                if tl.sum(valid.to(tl.int32), 0) > 0:
+                    score = _fp4_index_logits_tile(
+                        Q,
+                        W,
+                        TABLE,
+                        row,
+                        slot,
+                        valid,
+                        PAGE_SIZE,
+                        TABLE_STRIDE,
+                        QB,
+                        QH,
+                        WB,
+                        32,
+                        64,
+                    )
+                tl.store(
+                    OUT + (row0 + qi) * WIDTH + col,
+                    score,
+                    (row0 + qi < ROWS) & (col < WIDTH),
                 )
-            if tl.sum(valid1.to(tl.int32), 0) > 0:
-                score1 = _fp4_index_logits_tile(
-                    Q,
-                    W,
-                    TABLE,
-                    row1,
-                    slot1,
-                    valid1,
-                    PAGE_SIZE,
-                    TABLE_STRIDE,
-                    QB,
-                    QH,
-                    WB,
-                    32,
-                    64,
-                )
-    tl.store(OUT + row0 * WIDTH + col, score0, col < WIDTH)
-    tl.store(OUT + (row0 + 1) * WIDTH + col, score1, (row0 + 1 < ROWS) & (col < WIDTH))
+    else:
+        tl.store(OUT + row0 * WIDTH + col, -float("inf"), col < WIDTH)
+        tl.store(
+            OUT + (row0 + 1) * WIDTH + col,
+            -float("inf"),
+            (row0 + 1 < ROWS) & (col < WIDTH),
+        )
 
 
 def paired_query_logits(

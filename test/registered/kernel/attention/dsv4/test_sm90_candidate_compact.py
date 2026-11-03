@@ -164,6 +164,33 @@ class TestSm90CandidateCompact(CustomTestCase):
                         )
                         self.assert_scores(actual, expected, case)
 
+    def test_paired_disjoint_validity_and_poisoned_slots(self):
+        # A shared K tile can contain columns visible to only one query. Invalid
+        # slots must remain unread in the shared path and the odd-row fallback.
+        for masked in (False, True):
+            with self.subTest(masked=masked):
+                case = make_candidate_case(5, 193)
+                case["slots"][1::2].copy_(case["slots"][:4:2])
+                case["lens"].copy_(torch.tensor([0, 65, 129, 193, 193], device="cuda"))
+                cols = torch.arange(193, device="cuda")
+                mask = cols[None, :] % 2 == torch.arange(5, device="cuda")[:, None] % 2
+                mask = mask if masked else None
+                expected = fp4_index_logits_decode(
+                    **operands(case), candidate_mask=mask
+                )
+                valid = cols[None, :] < case["lens"][:, None]
+                if masked:
+                    valid &= mask
+                case["slots"].masked_fill_(
+                    ~valid, case["table"].shape[0] * case["page_size"] + 4096
+                )
+                actual = paired_query_logits(
+                    **operands(case),
+                    request_ids=torch.arange(5, device="cuda") // 2,
+                    candidate_mask=mask,
+                )
+                self.assert_scores(actual, expected, case)
+
     def test_source_consumer_pipeline_and_compression(self):
         for ratio in (1, 2):
             for compact, reuse in ((True, False), (False, True), (True, True)):
